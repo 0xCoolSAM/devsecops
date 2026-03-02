@@ -349,6 +349,26 @@ spec:
 EOF
 
 ########################################
+# Install metrics-server
+########################################
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
+
+# Patch with required args
+if ! kubectl get deployment metrics-server -n kube-system -o json | grep -q kubelet-insecure-tls; then
+  kubectl patch deployment metrics-server -n kube-system \
+    --type='json' \
+    -p='[
+      {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"},
+      {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-preferred-address-types=InternalIP"}
+    ]'
+fi
+
+# Restart and wait
+kubectl rollout restart deployment metrics-server -n kube-system
+kubectl rollout status deployment metrics-server -n kube-system
+kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
+########################################
 # DEVSECOPS LANDING PORTAL
 ########################################
 
@@ -594,6 +614,8 @@ helm upgrade --install defectdojo defectdojo/defectdojo \
   --set valkey.primary.persistence.storageClass=local-path \
   --set django.mediaPersistentVolume.enabled=true \
   --set django.mediaPersistentVolume.persistentVolumeClaim.create=true \
+  --set django.uwsgi.resources.requests.memory=2Gi \
+  --set django.uwsgi.resources.limits.memory=3Gi \
   --set django.uwsgi.extraEnv[0].name=DD_SECURE_PROXY_SSL_HEADER \
   --set-string 'django.uwsgi.extraEnv[0].value=HTTP_X_FORWARDED_PROTO\,https'
 
