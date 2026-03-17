@@ -74,26 +74,31 @@ ROOT_NS="devsecops-portal"
 
 ## ARGOCD
 ARGOCD_DOMAIN="argocd-${NIP_IP}.nip.io"
+ARGOCD_URL="argocd-${NIP_IP}.nip.io"
 ARGOCD_TLS="argocd-tls"
 ARGOCD_NS="argocd"
 
 #JENKINS
 JENKINS_DOMAIN="jenkins-${NIP_IP}.nip.io"
+JENKINS_URL="jenkins-${NIP_IP}.nip.io"
 JENKINS_TLS="jenkins-tls"
 JENKINS_NS="jenkins"
 
 #TEKTON
 TEKTON_DOMAIN="tekton-${NIP_IP}.nip.io"
+TEKTON_URL="tekton-${NIP_IP}.nip.io"
 TEKTON_TLS="tekton-tls"
 TEKTON_NS="tekton-pipelines"
 
 #SONARQUBE
 SONARQUBE_DOMAIN="sonarqube-${NIP_IP}.nip.io"
+SONAR_URL="sonarqube-${NIP_IP}.nip.io"
 SONARQUBE_TLS="sonarqube-tls"
 SONARQUBE_NS="sonarqube"
 
 #DEFECTDOJO
 DEFECTDOJO_DOMAIN="defectdojo-${NIP_IP}.nip.io"
+DEFECTDOJO_URL="defectdojo-${NIP_IP}.nip.io"
 DEFECTDOJO_TLS="defectdojo-tls"
 DEFECTDOJO_NS="defectdojo"
 
@@ -263,6 +268,20 @@ kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisione
 kubectl patch storageclass local-path \
   -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
+########################################
+# devsecops configmap
+########################################
+kubectl create namespace tekton-devsecops
+
+kubectl create configmap devsecops-urls \
+  --namespace tekton-devsecops \
+  --from-literal=SONAR_URL=$SONAR_URL \
+  --from-literal=DEFECTDOJO_URL=$DEFECTDOJO_URL \
+  --from-literal=JENKINS_URL=$JENKINS_URL \
+  --from-literal=ARGOCD_URL=$ARGOCD_URL \
+  --from-literal=TEKTON_URL=$TEKTON_URL \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # ########################################
 # # Install NGINX Ingress (bare metal)
 # ########################################
@@ -352,7 +371,7 @@ EOF
 # Install metrics-server
 ########################################
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
+# kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
 
 # Patch with required args
 if ! kubectl get deployment metrics-server -n kube-system -o json | grep -q kubelet-insecure-tls; then
@@ -367,7 +386,7 @@ fi
 # Restart and wait
 kubectl rollout restart deployment metrics-server -n kube-system
 kubectl rollout status deployment metrics-server -n kube-system
-kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
+# kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
 ########################################
 # DEVSECOPS LANDING PORTAL
 ########################################
@@ -852,6 +871,9 @@ echo "[5/8] Installing Tekton Dashboard..."
 
 kubectl apply -f https://storage.googleapis.com/tekton-releases/dashboard/latest/release-full.yaml
 kubectl wait --for=condition=available deployment tekton-dashboard -n $TEKTON_NS --timeout=300s
+
+kubectl apply -f https://storage.googleapis.com/tekton-releases/triggers/latest/release.yaml
+kubectl apply -f https://storage.googleapis.com/tekton-releases/triggers/latest/interceptors.yaml
 
 ########################################
 # Fix Dashboard RBAC
