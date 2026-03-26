@@ -275,11 +275,11 @@ kubectl create namespace tekton-devsecops
 
 kubectl create configmap devsecops-urls \
   --namespace tekton-devsecops \
-  --from-literal=SONAR_URL=$SONAR_URL \
-  --from-literal=DEFECTDOJO_URL=$DEFECTDOJO_URL \
-  --from-literal=JENKINS_URL=$JENKINS_URL \
-  --from-literal=ARGOCD_URL=$ARGOCD_URL \
-  --from-literal=TEKTON_URL=$TEKTON_URL \
+  --from-literal=SONAR_URL=https://$SONAR_URL \
+  --from-literal=DEFECTDOJO_URL=https://$DEFECTDOJO_URL \
+  --from-literal=JENKINS_URL=https://$JENKINS_URL \
+  --from-literal=ARGOCD_URL=https://$ARGOCD_URL \
+  --from-literal=TEKTON_URL=https://$TEKTON_URL \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # ########################################
@@ -1090,3 +1090,21 @@ sudo bash -c "cat > /etc/devsecops/passwords.json" <<EOF
 EOF
 
 sudo chmod 644 /etc/devsecops/passwords.json
+########################################
+# 
+########################################
+echo "Waiting for SonarQube..."
+
+until curl -s https://$SONAR_URL/api/system/status | grep -q '"status":"UP"'; do
+  sleep 5
+done
+
+echo "SonarQube ready"
+
+SONAR_TOKEN=$(curl -s -L -u 'admin:admin' -X POST --data-urlencode "name=tekton-token1" https://$SONAR_URL/api/user_tokens/generate | jq -r '.token')
+
+# Generate Sonar Secret for Auth
+kubectl create secret generic sonar-secret \
+  --from-literal=token="$SONAR_TOKEN" \
+  -n tekton-devsecops \
+  --dry-run=client -o yaml | kubectl apply -f -
