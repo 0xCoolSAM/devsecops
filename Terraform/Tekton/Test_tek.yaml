@@ -154,7 +154,7 @@ spec:
       image: aquasec/trivy:0.49.1
       workingDir: $(workspaces.source.path)
       script: |
-        sh trivy.sh $(params.image)
+        sh trivy.sh
 
 ############################################
 # OPA DOCKER
