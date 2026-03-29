@@ -1,0 +1,522 @@
+############################################
+# SERVICE ACCOUNT
+############################################
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devsecops-sa
+  # namespace: tekton-devsecops
+---
+############################################
+# WORKSPACE PVC
+############################################
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tekton-workspace
+  # namespace: tekton-devsecops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+############################################
+# TASK: GIT CLONE
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone
+spec:
+  params:
+    - name: repo
+  workspaces:
+    - name: output
+  steps:
+    - name: clone
+      image: alpine/git
+      workingDir: $(workspaces.output.path)
+      script: |
+        git clone $(params.repo) .
+############################################
+# TASK: MAVEN BUILD
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: maven-build
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: build
+      image: maven:3.9-eclipse-temurin-17
+      workingDir: $(workspaces.source.path)
+      script: |
+        mvn clean package -DskipTests
+
+############################################
+# UNIT TESTS
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: unit-tests
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: test
+      image: maven:3.9
+      workingDir: $(workspaces.source.path)
+      script: |
+        mvn test
+
+############################################
+# MUTATION TEST
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: mutation-tests
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: mutation
+      image: maven:3.9
+      workingDir: $(workspaces.source.path)
+      script: |
+        mvn org.pitest:pitest-maven:mutationCoverage || true
+
+############################################
+# SONAR SAST
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sonar-scan
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: scan
+      image: sonarsource/sonar-scanner-cli
+      workingDir: $(workspaces.source.path)
+      script: |
+        sonar-scanner \
+        -Dsonar.projectKey=devsecops \
+        -Dsonar.sources=. \
+        -Dsonar.java.binaries=target/classes
+
+############################################
+# DEPENDENCY CHECK
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: dependency-check
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: dependency
+      image: owasp/dependency-check
+      workingDir: $(workspaces.source.path)
+      script: |
+        sh dependency-check.sh \
+          --scan . \
+          --format JSON \
+          --out . \
+          --project devsecops || true
+
+############################################
+# TRIVY DOCKER
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trivy-docker
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: scan
+      image: aquasec/trivy:0.49.1
+      workingDir: $(workspaces.source.path)
+      script: |
+        sh trivy.sh $(params.image)
+
+############################################
+# OPA DOCKER
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: opa-docker
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: opa
+      image: openpolicyagent/conftest
+      script: |
+        conftest test $(workspaces.source.path)/Dockerfile || true
+
+############################################
+# BUILD IMAGE (KANIKO)
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: kaniko-build
+spec:
+  params:
+    - name: image
+  workspaces:
+    - name: source
+  steps:
+    - name: build
+      image: gcr.io/kaniko-project/executor
+      args:
+        - --dockerfile=$(workspaces.source.path)/Dockerfile
+        - --context=$(workspaces.source.path)
+        - --destination=$(params.image)
+
+############################################
+# TRIVY IMAGE
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trivy-image
+spec:
+  params:
+    - name: image
+  steps:
+    - name: scan
+      image: aquasec/trivy
+      script: |
+        trivy image $(params.image)
+
+############################################
+# K8S SECURITY
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: k8s-security
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: kubesec
+      image: kubesec/kubesec
+      script: |
+        kubesec scan $(workspaces.source.path)/k8s/*.yaml || true
+    - name: trivy
+      image: aquasec/trivy
+      script: |
+        trivy config $(workspaces.source.path) || true
+
+############################################
+# DEV DEPLOY
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-dev
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: deploy
+      image: bitnami/kubectl
+      script: |
+        kubectl apply -f $(workspaces.source.path)/k8s_deployment_service.yaml
+
+############################################
+# INTEGRATION TEST
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: integration-tests
+spec:
+  params:
+    - name: url
+  steps:
+    - name: test
+      image: curlimages/curl
+      script: |
+        curl -I $(params.url)
+
+############################################
+# ZAP DAST
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: zap-dast
+spec:
+  params:
+    - name: url
+  steps:
+    - name: zap
+      image: owasp/zap2docker-stable
+      script: |
+        zap-baseline.py -t $(params.url)
+
+############################################
+# MANUAL APPROVAL
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: manual-approval
+spec:
+  steps:
+    - name: approve
+      image: alpine
+      script: |
+        echo "Waiting approval"
+        sleep 60
+
+############################################
+# CIS BENCHMARK
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: kube-bench
+spec:
+  steps:
+    - name: cis
+      image: aquasec/kube-bench
+      script: |
+        kube-bench --benchmark cis-1.7 || true
+
+############################################
+# SLACK NOTIFY
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: slack
+spec:
+  params:
+    - name: message
+  steps:
+    - name: notify
+      image: curlimages/curl
+      script: |
+        echo "Slack: $(params.message)"
+
+############################################
+# PIPELINE
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: enterprise-devsecops-pipeline
+spec:
+
+  workspaces:
+    - name: workspace
+
+  params:
+    - name: repo
+    - name: image
+    - name: url
+
+  tasks:
+
+  - name: clone
+    taskRef:
+      name: git-clone
+    params:
+      - name: repo
+        value: $(params.repo)
+    workspaces:
+      - name: output
+        workspace: workspace
+
+  - name: build
+    runAfter: [clone]
+    taskRef:
+      name: maven-build
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: tests
+    runAfter: [build]
+    taskRef:
+      name: unit-tests
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: mutation
+    runAfter: [tests]
+    taskRef:
+      name: mutation-tests
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: sonar
+    runAfter: [mutation]
+    taskRef:
+      name: sonar-scan
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: dependency
+    runAfter: [build]
+    taskRef:
+      name: dependency-check
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: trivy
+    runAfter: [build]
+    taskRef:
+      name: trivy-docker
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: opa
+    runAfter: [build]
+    taskRef:
+      name: opa-docker
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: build-image
+    runAfter: [sonar,dependency,trivy,opa]
+    taskRef:
+      name: kaniko-build
+    params:
+      - name: image
+        value: $(params.image)
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: image-scan
+    runAfter: [build-image]
+    taskRef:
+      name: trivy-image
+    params:
+      - name: image
+        value: $(params.image)
+
+  - name: k8s-security
+    runAfter: [image-scan]
+    taskRef:
+      name: k8s-security
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: deploy-dev
+    runAfter: [k8s-security]
+    taskRef:
+      name: deploy-dev
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  - name: integration
+    runAfter: [deploy-dev]
+    taskRef:
+      name: integration-tests
+    params:
+      - name: url
+        value: $(params.url)
+
+  - name: zap
+    runAfter: [integration]
+    taskRef:
+      name: zap-dast
+    params:
+      - name: url
+        value: $(params.url)
+
+  - name: approval
+    runAfter: [zap]
+    taskRef:
+      name: manual-approval
+
+  - name: cis
+    runAfter: [approval]
+    taskRef:
+      name: kube-bench
+
+  finally:
+
+  - name: slack
+    taskRef:
+      name: slack
+    params:
+      - name: message
+        value: "DevSecOps Pipeline Completed"
+
+
+#################################################
+# PIPELINERUN
+#################################################
+
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: enterprise-devsecops-run
+
+spec:
+
+  taskRunTemplate:
+    serviceAccountName: devsecops-sa
+
+  pipelineRef:
+    name: enterprise-devsecops-pipeline
+
+  params:
+    - name: repo
+      value: https://github.com/0x70ssAM/devsecops
+
+    - name: image
+      value: docker.io/library/devsecops-demo:latest
+
+    - name: url
+      value: http://devsecops-app
+
+  workspaces:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: tekton-workspace

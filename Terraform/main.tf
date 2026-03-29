@@ -208,12 +208,17 @@ resource "null_resource" "bootstrap" {
   source      = "Tekton/Full_tek.yaml"
   destination = "/tmp/Full_tek.yaml"
   }
+  
+  provisioner "file" {
+  source      = "Tekton/Test_tek.yaml"
+  destination = "/tmp/Test_tek.yaml"
+  }
 
   provisioner "remote-exec" {
     inline = [
       "chmod +x /tmp/bootstrap.sh",
       "sudo bash /tmp/bootstrap.sh",
-      "kubectl apply -f /tmp/Full_tek.yaml"
+      "kubectl apply -f /tmp/Test_tek.yaml"
     ]
   }
 }
