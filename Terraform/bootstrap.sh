@@ -710,6 +710,39 @@ EOF
 check_cert "$ARGOCD_NS" "$ARGOCD_TLS"
 
 ########################################
+# SonarQube
+########################################
+log "Installing SonarQube"
+
+helm repo add sonarqube https://SonarSource.github.io/helm-chart-sonarqube
+helm repo update
+
+kubectl create namespace sonarqube 2>/dev/null || true
+
+kubectl create secret generic sonarqube-monitoring-passcode \
+  -n sonarqube \
+  --from-literal=monitoring-passcode=demo123 \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+helm upgrade --install sonarqube sonarqube/sonarqube \
+  -n sonarqube \
+  --create-namespace \
+  --set community.enabled=true \
+  --set monitoringPasscodeSecretName=sonarqube-monitoring-passcode \
+  --set monitoringPasscodeSecretKey=monitoring-passcode \
+  --set ingress.enabled=true \
+  --set ingress.ingressClassName=nginx \
+  --set ingress.hosts[0].name=sonarqube-${NIP_IP}.nip.io \
+  --set ingress.tls[0].hosts[0]=sonarqube-${NIP_IP}.nip.io \
+  --set ingress.tls[0].secretName=sonarqube-tls \
+  --set ingress.annotations."cert-manager\.io/cluster-issuer"=letsencrypt-http
+
+########################################
+# Certificate Health Check + Retry Logic - SONARQUBE
+########################################
+check_cert "$SONARQUBE_NS" "$SONARQUBE_TLS"
+
+########################################
 # Jenkins
 ########################################
 log "Installing Jenkins"
@@ -814,39 +847,6 @@ EOF
 ########################################
 
 check_cert "$JENKINS_NS" "$JENKINS_TLS"
-
-########################################
-# SonarQube
-########################################
-log "Installing SonarQube"
-
-helm repo add sonarqube https://SonarSource.github.io/helm-chart-sonarqube
-helm repo update
-
-kubectl create namespace sonarqube 2>/dev/null || true
-
-kubectl create secret generic sonarqube-monitoring-passcode \
-  -n sonarqube \
-  --from-literal=monitoring-passcode=demo123 \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-helm upgrade --install sonarqube sonarqube/sonarqube \
-  -n sonarqube \
-  --create-namespace \
-  --set community.enabled=true \
-  --set monitoringPasscodeSecretName=sonarqube-monitoring-passcode \
-  --set monitoringPasscodeSecretKey=monitoring-passcode \
-  --set ingress.enabled=true \
-  --set ingress.ingressClassName=nginx \
-  --set ingress.hosts[0].name=sonarqube-${NIP_IP}.nip.io \
-  --set ingress.tls[0].hosts[0]=sonarqube-${NIP_IP}.nip.io \
-  --set ingress.tls[0].secretName=sonarqube-tls \
-  --set ingress.annotations."cert-manager\.io/cluster-issuer"=letsencrypt-http
-
-########################################
-# Certificate Health Check + Retry Logic - SONARQUBE
-########################################
-check_cert "$SONARQUBE_NS" "$SONARQUBE_TLS"
 
 ########################################
 # TEKTON

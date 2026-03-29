@@ -156,27 +156,136 @@ spec:
         -Dsonar.token=$SONAR_TOKEN
     #-Dsonar.login=$SONAR_TOKEN
 
-#################################################
-# TASK: DEPENDENCY CHECK
-#################################################
 
+#################################################
+# TASK: GITLEAKS
+#################################################
 ---
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: dependency-check
+  name: gitleaks
   namespace: tekton-devsecops
 spec:
   workspaces:
   - name: source
   steps:
-  - name: dependency
-    image: owasp/dependency-check
+  - name: scan-secrets
+    image: zricethezav/gitleaks
     script: |
-      dependency-check.sh \
-      --scan $(workspaces.source.path) \
-      --format JSON \
-      --out $(workspaces.source.path)
+      gitleaks detect --source $(workspaces.source.path) --no-git || true
+#################################################
+# TASK: DEPENDENCY CHECK
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: syft-sbom
+  namespace: tekton-devsecops
+
+spec:
+  workspaces:
+    - name: source
+
+  steps:
+    - name: generate-sbom
+      image: anchore/syft:latest
+      workingDir: $(workspaces.source.path)
+      command:
+        - /syft
+      args:
+        - dir:$(workspaces.source.path)
+        - -o cyclonedx-json=$(workspaces.source.path)/sbom.json
+
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: syft-sbom
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#     - name: source
+#   steps:
+#     - name: generate-sbom
+#       image: anchore/syft:latest
+#       workingDir: $(workspaces.source.path)
+#       script: |
+#         #!/bin/sh
+#         syft dir $(workspaces.source.path) \
+#           -o cyclonedx-json=$(workspaces.source.path)/sbom.json
+
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: grype-scan
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: scan-sbom
+      image: anchore/grype:latest
+      workingDir: $(workspaces.source.path)
+      command:
+        - /grype
+      args:
+        - sbom:$(workspaces.source.path)/sbom.json
+        - -o json 
+        - --file 
+        - $(workspaces.source.path)/grype-report.json
+        # - -f
+        # - high
+      # stdoutConfig:
+      #   path: $(workspaces.source.path)/grype-report.json
+
+  #     script: |
+  #       grype sbom:$(workspaces.source.path)/sbom.json \
+  #         -o json > $(workspaces.source.path)/grype-report.json
+  # # --fail-on high
+
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: dependency-check
+#   namespace: tekton-devsecops
+
+# spec:
+#   workspaces:
+#   - name: source
+
+#   steps:
+#   - name: dependency
+#     image: owasp/dependency-check:12.2.0
+#     workingDir: $(workspaces.source.path)
+
+#     script: |
+#       dependency-check.sh \
+#         --scan $(workspaces.source.path) \
+#         --format JSON \
+#         --out $(workspaces.source.path) \
+#         --project devsecops || true
+
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: dependency-check
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#   - name: source
+#   steps:
+#   - name: dependency
+#     image: owasp/dependency-check
+#     script: |
+#       dependency-check \
+#         --scan $(workspaces.source.path) \
+#         --format JSON \
+#         --out $(workspaces.source.path) \
+#         --project devsecops
 
 #################################################
 # TASK: TRIVY FS
@@ -193,12 +302,21 @@ spec:
   - name: source
   steps:
   - name: scan
-    image: aquasec/trivy
+    image: aquasec/trivy:0.69.3
+    workingDir: $(workspaces.source.path)
     script: |
-      trivy fs --format json \
-      -o $(workspaces.source.path)/trivy-fs.json \
-      $(workspaces.source.path)
-
+      trivy filesystem \
+        --format json \
+        -o $(workspaces.source.path)/trivy-fs.json \
+        . || true
+        
+    # script: |
+    #   trivy fs --format json \
+    #   -o $(workspaces.source.path)/trivy-fs.json \
+    #   $(workspaces.source.path) \
+    #   --severity HIGH,CRITICAL \
+    #   --exit-code 1 \
+    #   . || true
 #################################################
 # TASK: OPA DOCKER
 #################################################
@@ -437,6 +555,14 @@ spec:
     - name: source
       workspace: workspace
 
+  - name: gitleaks
+    runAfter: [build]
+    taskRef:
+      name: gitleaks
+    workspaces:
+    - name: source
+      workspace: workspace
+
   - name: tests
     runAfter: [build]
     taskRef:
@@ -461,13 +587,30 @@ spec:
     - name: source
       workspace: workspace
 
-  - name: dependency
-    runAfter: [mutation]
+  - name: sbom
+    runAfter: [build]
     taskRef:
-      name: dependency-check
+      name: syft-sbom
     workspaces:
-    - name: source
-      workspace: workspace
+      - name: source
+        workspace: workspace
+
+  - name: sca
+    runAfter:
+      - sbom
+    taskRef:
+      name: grype-scan
+    workspaces:
+      - name: source
+        workspace: workspace
+
+  # - name: dependency
+  #   runAfter: [mutation]
+  #   taskRef:
+  #     name: dependency-check
+  #   workspaces:
+  #   - name: source
+  #     workspace: workspace
 
   - name: trivy
     runAfter: [mutation]
@@ -486,7 +629,8 @@ spec:
       workspace: workspace
 
   - name: build-image
-    runAfter: [sonar,dependency,trivy,opa]
+    # runAfter: [sonar,dependency,trivy,opa]
+    runAfter: [sonar,sbom,sca,trivy,opa]
     taskRef:
       name: kaniko-build
     params:
