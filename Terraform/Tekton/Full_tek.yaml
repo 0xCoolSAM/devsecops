@@ -1,8 +1,22 @@
+############################################
+# NAMESPACE
+############################################
+# apiVersion: v1
+# kind: Namespace
+# metadata:
+#   name: tekton-devsecops
+# ---
+############################################
+# SERVICE ACCOUNT
+############################################
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: tekton-devsecops-sa
   namespace: tekton-devsecops
+############################################
+# ClusterRoleBinding
+############################################
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -16,6 +30,9 @@ roleRef:
   kind: ClusterRole
   name: cluster-admin
   apiGroup: rbac.authorization.k8s.io
+############################################
+# WORKSPACE PVC
+############################################
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -28,11 +45,31 @@ spec:
   resources:
     requests:
       storage: 10Gi
-
+# ------------------------
+# Secrets (EDIT VALUES)
+# ------------------------
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: defectdojo-secret
+#   namespace: tekton-devsecops
+# type: Opaque
+# stringData:
+#   url: http://defectdojo:8080
+#   token: CHANGE_ME
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: slack-secret
+#   namespace: tekton-devsecops
+# type: Opaque
+# stringData:
+#   webhook: CHANGE_ME
 #################################################
 # TASK: GIT CLONE
 #################################################
-
 ---
 apiVersion: tekton.dev/v1
 kind: Task
@@ -47,6 +84,7 @@ spec:
   steps:
   - name: clone
     image: alpine/git
+    workingDir: $(workspaces.output.path)
     script: |
       git clone $(params.repo-url) $(workspaces.output.path)
 
@@ -262,7 +300,7 @@ spec:
 #     workingDir: $(workspaces.source.path)
 
 #     script: |
-#       dependency-check.sh \
+#       sh dependency-check.sh \
 #         --scan $(workspaces.source.path) \
 #         --format JSON \
 #         --out $(workspaces.source.path) \
@@ -286,6 +324,25 @@ spec:
 #         --format JSON \
 #         --out $(workspaces.source.path) \
 #         --project devsecops
+
+############################################
+# TRIVY DOCKER
+############################################
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: trivy-docker
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#     - name: source
+#   steps:
+#     - name: scan
+#       image: aquasec/trivy:0.49.1
+#       workingDir: $(workspaces.source.path)
+#       script: |
+#         sh trivy.sh
 
 #################################################
 # TASK: TRIVY FS
@@ -342,7 +399,42 @@ spec:
 #       #   - |
 #       #     chmod +x $(workspaces.source.path)/trivy-docker-image-scan.sh
 #       #     $(workspaces.source.path)/trivy-docker-image-scan.sh
-      
+
+#################################################
+# TASK: hadolint
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: hadolint
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  steps:
+  - name: lint
+    image: hadolint/hadolint
+    workingDir: $(workspaces.source.path)
+    command:
+      - hadolint
+    args:
+      - Dockerfile
+
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: hadolint
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#   - name: source
+#   steps:
+#   - name: lint
+#     image: hadolint/hadolint
+#     script: |
+#       hadolint $(workspaces.source.path)/Dockerfile
+
 #################################################
 # TASK: OPA DOCKER
 #################################################
@@ -402,6 +494,7 @@ spec:
     image: aquasec/trivy
     script: |
       trivy image $(params.image)
+# trivy image --format json -o $(workspaces.source.path)/trivy-image.json $(params.image)
 
 #################################################
 # TASK: COSIGN SIGN
@@ -445,11 +538,27 @@ spec:
     image: aquasec/trivy
     script: |
       trivy config $(workspaces.source.path) || true
+############################################
+# DEV DEPLOY
+############################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-dev
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: deploy
+      image: bitnami/kubectl
+      script: |
+        kubectl apply -f $(workspaces.source.path)/k8s_deployment_service.yaml
 
 #################################################
 # TASK: INTEGRATION TEST
 #################################################
-
 ---
 apiVersion: tekton.dev/v1
 kind: Task
@@ -465,10 +574,92 @@ spec:
     script: |
       curl -I $(params.target) || true
 
+# # ------------------------
+# # TASK: Upload Scan → DefectDojo
+# # ------------------------
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: upload-defectdojo
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: scan-file
+#   - name: scan-type
+#   steps:
+#   - name: upload
+#     image: curlimages/curl
+#     env:
+#     - name: DD_URL
+#       valueFrom:
+#         configMapKeyRef:
+#           name: devsecops-urls
+#           key: DEFECTDOJO_URL
+
+#     - name: DD_TOKEN
+#       valueFrom:
+#         secretKeyRef:
+#           name: defectdojo-secret
+#           key: token
+#     script: |
+#       curl -X POST "$DD_URL/api/v2/import-scan/" \
+#       -H "Authorization: Token $DD_TOKEN" \
+#       -F "scan_type=$(params.scan-type)" \
+#       -F "file=@$(params.scan-file)"
+# # ------------------------
+# # TASK: GitOps Update
+# # ------------------------
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: gitops-update
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: repo
+#   - name: image
+#   steps:
+#   - name: update
+#     image: alpine/git
+#     script: |
+#       git clone $(params.repo) repo
+#       cd repo
+#       sed -i "s|image:.*|image: $(params.image)|g" deployment.yaml
+#       git config user.email "hossamibraheem2014@gmail.com"
+#       git config user.name "0x70ssAM"
+#       git commit -am "Update image"
+#       git push
+# # ------------------------
+# # TASK: ArgoCD Deploy
+# # ------------------------
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: argocd-sync
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: app
+#   steps:
+#   - name: deploy
+#     image: argoproj/argocd
+#     # command: ["/bin/sh","-c"]
+#     env:
+#     - name: ARGOCD_SERVER
+#       valueFrom:
+#         configMapKeyRef:
+#           name: devsecops-urls
+#           key: ARGOCD_URL    
+#     script: |
+#       argocd login $ARGOCD_SERVER --insecure
+#       argocd app sync $(params.app)
+
 #################################################
 # TASK: ZAP
 #################################################
-
 ---
 apiVersion: tekton.dev/v1
 kind: Task
@@ -482,7 +673,7 @@ spec:
   - name: zap
     image: owasp/zap2docker-stable
     script: |
-      zap-baseline.py -t $(params.target)
+      zap-baseline.py -t $(params.target) -J $(workspaces.source.path)/zap.json
 
 #################################################
 # TASK: MANUAL APPROVAL
@@ -518,6 +709,7 @@ spec:
     image: aquasec/kube-bench
     script: |
       kube-bench --benchmark cis-1.7 || true
+# kube-bench run --targets node
 
 #################################################
 # TASK: SLACK
@@ -537,6 +729,15 @@ spec:
     image: curlimages/curl
     script: |
       echo "Slack notification: $(params.message)"
+    # env:
+    # - name: WEBHOOK
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: slack-secret
+    #       key: webhook
+    # script: |
+    #   curl -X POST -H 'Content-type: application/json' \
+    #   --data "{\"text\":\"$(params.message)\"}" $WEBHOOK
 
 #################################################
 # PIPELINE
@@ -546,7 +747,7 @@ spec:
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: devsecops-pipeline-v2
+  name: devsecops-pipeline
   namespace: tekton-devsecops
 
 spec:
@@ -559,6 +760,8 @@ spec:
   - name: repo-url
   - name: image
   - name: zap-target
+  # - name: gitops-repo
+  # - name: argocd-app
 
   tasks:
 
@@ -645,6 +848,13 @@ spec:
     - name: source
       workspace: workspace
 
+  - name: hadolint
+    runAfter: [tests]
+    taskRef: {name: hadolint}
+    workspaces:
+    - name: source
+      workspace: workspace
+
   - name: opa
     runAfter: [mutation]
     taskRef:
@@ -673,6 +883,31 @@ spec:
     - name: image
       value: $(params.image)
 
+  # - name: upload-trivy
+  #   runAfter: [image-scan]
+  #   taskRef: {name: upload-defectdojo}
+  #   params:
+  #   - name: scan-file
+  #     value: $(workspaces.source.path)/trivy-image.json
+  #   - name: scan-type
+  #     value: Trivy Scan
+
+  # - name: gitops
+  #   runAfter: [upload-trivy]
+  #   taskRef: {name: gitops-update}
+  #   params:
+  #   - name: repo
+  #     value: $(params.gitops-repo)
+  #   - name: image
+  #     value: $(params.image)
+
+  # - name: deploy
+  #   runAfter: [gitops]
+  #   taskRef: {name: argocd-sync}
+  #   params:
+  #   - name: app
+  #     value: $(params.argocd-app)
+
   - name: cosign
     runAfter: [image-scan]
     taskRef:
@@ -689,6 +924,14 @@ spec:
     - name: source
       workspace: workspace
 
+  - name: deploy-dev
+    runAfter: [k8s-scan]
+    taskRef:
+      name: deploy-dev
+    workspaces:
+      - name: source
+        workspace: workspace
+
   - name: integration
     runAfter: [k8s-scan]
     taskRef:
@@ -704,6 +947,15 @@ spec:
     params:
     - name: target
       value: $(params.zap-target)
+
+  # - name: upload-zap
+  #   runAfter: [zap]
+  #   taskRef: {name: upload-defectdojo}
+  #   params:
+  #   - name: scan-file
+  #     value: $(workspaces.source.path)/zap.json
+  #   - name: scan-type
+  #     value: ZAP Scan
 
   - name: approval
     runAfter: [zap]
@@ -739,7 +991,7 @@ metadata:
 spec:
 
   pipelineRef:
-    name: devsecops-pipeline-v2
+    name: devsecops-pipeline
 
   taskRunTemplate:
     serviceAccountName: tekton-devsecops-sa
@@ -759,3 +1011,61 @@ spec:
 
   - name: zap-target
     value: http://example.com
+
+  # - name: gitops-repo
+  #   value: https://github.com/0x70ssAM/devsecops
+
+  # - name: argocd-app
+  #   value: devsecops-app
+
+# # ------------------------
+# # Tekton Trigger
+# # ------------------------
+# ---
+# apiVersion: triggers.tekton.dev/v1beta1
+# kind: TriggerBinding
+# metadata:
+#   name: github-binding
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: repo-url
+#     value: $(body.repository.clone_url)
+# ---
+# apiVersion: triggers.tekton.dev/v1beta1
+# kind: TriggerTemplate
+# metadata:
+#   name: pipeline-template
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: repo-url
+#   resourcetemplates:
+#   - apiVersion: tekton.dev/v1
+#     kind: PipelineRun
+#     metadata:
+#       generateName: devsecops-triggered-
+#     spec:
+#       pipelineRef:
+#         name: devsecops-pipeline
+#       params:
+#       - name: repo-url
+#         value: $(tt.params.repo-url)
+#       workspaces:
+#       - name: workspace
+#         persistentVolumeClaim:
+#           claimName: tekton-workspace
+# ---
+# apiVersion: triggers.tekton.dev/v1beta1
+# kind: EventListener
+# metadata:
+#   name: github-listener
+#   namespace: tekton-devsecops
+# spec:
+#   serviceAccountName: tekton-devsecops-sa
+#   triggers:
+#   - name: github-trigger
+#     bindings:
+#     - ref: github-binding
+#     template:
+#       ref: pipeline-template
