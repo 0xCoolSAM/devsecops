@@ -218,7 +218,7 @@ resource "null_resource" "bootstrap" {
     inline = [
       "chmod +x /tmp/bootstrap.sh",
       "sudo bash /tmp/bootstrap.sh",
-      "kubectl apply -f /tmp/Full_tek.yaml"
+      "kubectl apply -f /tmp/Test_tek.yaml"
     ]
   }
 }
