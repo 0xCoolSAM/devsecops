@@ -388,6 +388,55 @@ kubectl rollout restart deployment metrics-server -n kube-system
 kubectl rollout status deployment metrics-server -n kube-system
 # kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=120s
 ########################################
+# Installing NFS server
+########################################
+echo "Installing NFS server..."
+
+sudo apt update
+sudo apt install -y nfs-kernel-server
+
+echo "Creating NFS shared directory..."
+
+sudo mkdir -p /srv/nfs
+sudo chmod 777 /srv/nfs
+
+echo "Configuring NFS exports..."
+
+sudo bash -c 'cat >/etc/exports <<EOF
+/srv/nfs *(rw,sync,no_subtree_check,no_root_squash)
+EOF'
+
+sudo exportfs -rav
+sudo systemctl enable nfs-kernel-server
+sudo systemctl restart nfs-kernel-server
+
+echo "Detecting Kubernetes node IP..."
+
+NODE_IP=$(kubectl get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+
+echo "Node IP detected: $NODE_IP"
+
+echo "Installing NFS provisioner Helm chart..."
+
+helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+helm repo update
+
+helm install nfs-rwx nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
+  --set nfs.server=$NODE_IP \
+  --set nfs.path=/srv/nfs
+
+echo "Waiting for provisioner to be ready..."
+
+kubectl rollout status deployment nfs-rwx-nfs-subdir-external-provisioner
+
+echo "NFS RWX storage installed successfully!"
+
+kubectl get storageclass
+
+kubectl patch storageclass nfs-client \
+  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+########################################
 # DEVSECOPS LANDING PORTAL
 ########################################
 
@@ -1032,6 +1081,19 @@ else
     echo "kubectl describe certificate tekton-tls -n $TEKTON_NS"
 fi
 
+
+# Disable Tekton Affinity Assistant
+# This allows PipelineRuns to use multiple PVC workspaces
+# (required when pipelines mount more than one volume)
+
+kubectl patch configmap feature-flags -n tekton-pipelines \
+--type merge -p '{"data":{"coschedule":"disabled"}}'
+kubectl annotate configmap feature-flags \
+-n tekton-pipelines \
+kubectl.kubernetes.io/last-applied-configuration- 
+
+kubectl rollout restart deployment tekton-pipelines-controller -n tekton-pipelines
+
 ########################################
 # Final Result
 ########################################
@@ -1108,3 +1170,45 @@ kubectl create secret generic sonar-secret \
   --from-literal=token="$SONAR_TOKEN" \
   -n tekton-devsecops \
   --dry-run=client -o yaml | kubectl apply -f -
+########################################
+# 
+########################################
+DD_URL="https://${DEFECTDOJO_URL}"
+DD_USER="admin"
+DD_PASS="Admin@123"
+
+echo "Waiting for DefectDojo..."
+
+until [ "$(curl -sk -o /dev/null -w "%{http_code}" "$DD_URL/api/v2/oa3/schema/?format=json")" = "200" ]; do
+  sleep 5
+done
+
+echo "DefectDojo ready"
+
+DD_TOKEN=$(curl -s -X POST \
+  -H "content-type: application/json" \
+  $DD_URL/api/v2/api-token-auth/ \
+  -d "{\"username\":\"$DD_USER\",\"password\":\"$DD_PASS\"}" \
+  | jq -r '.token')
+
+kubectl create secret generic defectdojo-secret \
+  --from-literal=token="$DD_TOKEN" \
+  -n tekton-devsecops \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# # Upload Sample Test
+# SCAN_TYPE=$1
+# REPORT_FILE=$2
+
+# curl -k -X POST "$DD_URL/api/v2/import-scan/" \
+#   -H "Authorization: Token $DD_TOKEN" \
+#   -H "accept: application/json" \
+#   -F "scan_type=$SCAN_TYPE" \
+#   -F "file=@$REPORT" \
+#   -F "product_name=DevSecOps-App" \
+#   -F "product_type_name=Applications" \
+#   -F "engagement_name=Tekton Pipeline" \
+#   -F "auto_create_context=true" \
+#   -F "active=true" \
+#   -F "verified=true" \
+#   -F "minimum_severity=Low"

@@ -45,6 +45,30 @@ spec:
   resources:
     requests:
       storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maven-cache
+  namespace: tekton-devsecops
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: security-reports
+  namespace: tekton-devsecops
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
 # ------------------------
 # Secrets (EDIT VALUES)
 # ------------------------
@@ -455,6 +479,44 @@ spec:
       conftest test $(workspaces.source.path)/Dockerfile || true
 
 #################################################
+# TASK: CONFTEST K8S
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: conftest-k8s
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  steps:
+  - name: conftest
+    image: openpolicyagent/conftest:v0.58.0
+    workingDir: $(workspaces.source.path)
+    script: |
+      conftest test $(workspaces.source.path)/k8s_deployment_service.yaml --policy . --output json > $(workspaces.source.path)/conftest-k8s.json
+
+#################################################
+# TASK: CHECKOV
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: checkov-iac
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  steps:
+  - name: scan
+    image: bridgecrew/checkov:3.2.299
+    workingDir: $(workspaces.source.path)
+    script: |
+      checkov -d Terraform --output json --output-file-path $(workspaces.source.path)/checkov.json
+
+#################################################
 # TASK: KANIKO BUILD
 #################################################
 
@@ -472,10 +534,13 @@ spec:
   steps:
   - name: build
     image: gcr.io/kaniko-project/executor:latest
+    workingDir: $(workspaces.source.path)
     args:
       - --dockerfile=$(workspaces.source.path)/Dockerfile
       - --context=$(workspaces.source.path)
       - --destination=$(params.image)
+      - --no-push
+      - --tarPath=$(workspaces.source.path)/app-image.tar
 
 #################################################
 # TASK: TRIVY IMAGE
@@ -492,10 +557,10 @@ spec:
   steps:
   - name: scan
     image: aquasec/trivy
+    workingDir: $(workspaces.source.path)
     script: |
-      trivy image $(params.image)
+      trivy image $(params.image) --input $(workspaces.source.path)/app-image.tar --format sarif --output $(workspaces.source.path)/trivy-image.sarif
 # trivy image --format json -o $(workspaces.source.path)/trivy-image.json $(params.image)
-
 #################################################
 # TASK: COSIGN SIGN
 #################################################
@@ -509,12 +574,15 @@ metadata:
 spec:
   params:
   - name: image
+  workspaces:
+  - name: source
   steps:
   - name: sign
     image: ghcr.io/sigstore/cosign/cosign
     script: |
       echo "Signing image"
       cosign sign --key cosign.key $(params.image) || true
+    # cosign sign --key /etc/cosign/cosign.key $(params.image)
 
 #################################################
 # TASK: K8S SECURITY
@@ -532,12 +600,14 @@ spec:
   steps:
   - name: kubesec
     image: kubesec/kubesec
+    workingDir: $(workspaces.source.path)
     script: |
-      kubesec scan $(workspaces.source.path)/k8s/*.yaml || true
+      kubesec scan $(workspaces.source.path)/k8s_deployment_service.yaml > $(workspaces.source.path)/kubesec.json || true
   - name: trivy-k8s
     image: aquasec/trivy
+    workingDir: $(workspaces.source.path)
     script: |
-      trivy config $(workspaces.source.path) || true
+      trivy config --format json --output $(workspaces.source.path)/trivy-config.json k8s_deployment_service.yaml || true
 ############################################
 # DEV DEPLOY
 ############################################
@@ -587,6 +657,8 @@ spec:
 #   params:
 #   - name: scan-file
 #   - name: scan-type
+#   workspaces:
+#   - name: source
 #   steps:
 #   - name: upload
 #     image: curlimages/curl
@@ -603,21 +675,13 @@ spec:
 #           name: defectdojo-secret
 #           key: token
 #     script: |
-#       curl -k -X POST "$DD_URL/api/v2/import-scan/" \
-#         -H "Authorization: Token $DD_TOKEN" \
-#         -H "accept: application/json" \
-#         -F "scan_type=$(params.scan-type)" \
-#         -F "file=@$(params.scan-file)" \
-#         -F "product_name=DevSecOps-App" \
-#         -F "product_type_name=Applications" \
-#         -F "engagement_name=Tekton Pipeline" \
-#         -F "auto_create_context=true" \
-#         -F "active=true" \
-#         -F "verified=true" \
-#         -F "minimum_severity=Low"
-## ------------------------
-## TASK: GitOps Update
-## ------------------------
+#       curl -X POST "$DD_URL/api/v2/import-scan/" \
+#       -H "Authorization: Token $DD_TOKEN" \
+#       -F "scan_type=$(params.scan-type)" \
+#       -F "file=@$(params.scan-file)"
+# # ------------------------
+# # TASK: GitOps Update
+# # ------------------------
 # ---
 # apiVersion: tekton.dev/v1
 # kind: Task
@@ -867,6 +931,22 @@ spec:
     runAfter: [mutation]
     taskRef:
       name: opa-docker
+    workspaces:
+    - name: source
+      workspace: workspace
+
+  - name: conftest-k8s
+    runAfter: [mutation]
+    taskRef:
+      name: conftest-k8s
+    workspaces:
+    - name: source
+      workspace: workspace
+
+  - name: checkov-iac
+    runAfter: [mutation]
+    taskRef:
+      name: checkov-iac
     workspaces:
     - name: source
       workspace: workspace

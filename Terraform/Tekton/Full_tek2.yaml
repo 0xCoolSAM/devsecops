@@ -1,0 +1,926 @@
+############################################
+# SERVICE ACCOUNT
+############################################
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tekton-devsecops-sa
+  namespace: tekton-devsecops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tekton-devsecops-admin
+subjects:
+- kind: ServiceAccount
+  name: tekton-devsecops-sa
+  namespace: tekton-devsecops
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tekton-workspace
+  namespace: tekton-devsecops
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maven-cache
+  namespace: tekton-devsecops
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: security-reports
+  namespace: tekton-devsecops
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+#################################################
+# TASK: GIT CLONE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone
+  namespace: tekton-devsecops
+spec:
+  params:
+  - name: repo-url
+  - name: revision
+    default: main
+  workspaces:
+  - name: output
+  steps:
+  - name: clone
+    image: alpine/git:2.45.2
+    workingDir: $(workspaces.output.path)
+    script: |
+      set -eu
+      rm -rf repo
+      git clone --depth 1 --branch "$(params.revision)" "$(params.repo-url)" repo
+      cp -R repo/. $(workspaces.output.path)/
+      rm -rf repo
+
+#################################################
+# TASK: MAVEN COMPILE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: maven-compile
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: maven-cache
+    mountPath: /root/.m2
+  steps:
+  - name: compile
+    image: maven:3.9.9-eclipse-temurin-17
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mvn -B -ntp -Dmaven.repo.local=/root/.m2 -DskipTests compile
+
+#################################################
+# TASK: UNIT TESTS
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: unit-tests
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: maven-cache
+    mountPath: /root/.m2
+  steps:
+  - name: test
+    image: maven:3.9.9-eclipse-temurin-17
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mvn -B -ntp -Dmaven.repo.local=/root/.m2 test
+
+#################################################
+# TASK: MUTATION TESTS
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: pit-tests
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: maven-cache
+    mountPath: /root/.m2
+  steps:
+  - name: mutation
+    image: maven:3.9.9-eclipse-temurin-17
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mvn -B -ntp -Dmaven.repo.local=/root/.m2 org.pitest:pitest-maven:mutationCoverage
+
+#################################################
+# TASK: MAVEN PACKAGE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: maven-package
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: maven-cache
+    mountPath: /root/.m2
+  steps:
+  - name: package
+    image: maven:3.9.9-eclipse-temurin-17
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mvn -B -ntp -Dmaven.repo.local=/root/.m2 -DskipTests package
+
+#################################################
+# TASK: SONAR SCAN
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sonarqube-scan
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  steps:
+  - name: scan
+    image: sonarsource/sonar-scanner-cli:11.1.0.2693_1
+    workingDir: $(workspaces.source.path)
+    env:
+    - name: SONAR_HOST_URL
+      valueFrom:
+        configMapKeyRef:
+          name: devsecops-urls
+          key: SONAR_URL
+    - name: SONAR_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: sonar-secret
+          key: token
+    script: |
+      set -eu
+      sonar-scanner \
+        -Dsonar.projectKey=devsecops \
+        -Dsonar.sources=. \
+        -Dsonar.java.binaries=target/classes \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.token=$SONAR_TOKEN
+
+#################################################
+# TASK: GITLEAKS
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: gitleaks
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: scan-secrets
+    image: zricethezav/gitleaks:v8.18.4
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      gitleaks detect \
+        --source . \
+        --no-git \
+        --report-format sarif \
+        --report-path /workspace/security-reports/gitleaks.sarif
+
+#################################################
+# TASK: TRUFFLEHOG
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trufflehog
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: scan-secrets
+    image: trufflesecurity/trufflehog:3.90.5
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      trufflehog filesystem . --json > /workspace/security-reports/trufflehog.json
+
+#################################################
+# TASK: SOURCE SBOM
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: syft-source-sbom
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: generate-sbom
+    image: anchore/syft:v1.20.0
+    workingDir: $(workspaces.source.path)
+    command:
+    - /syft
+    args:
+    - dir:$(workspaces.source.path)
+    - -o
+    - cyclonedx-json=/workspace/security-reports/sbom-source.json
+
+#################################################
+# TASK: SCA
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: grype-scan
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: scan-sbom
+    image: anchore/grype:v0.86.1
+    workingDir: /workspace/security-reports
+    command:
+    - /grype
+    args:
+    - sbom:/workspace/security-reports/sbom-source.json
+    - -o
+    - json
+    - --file
+    - /workspace/security-reports/grype-report.json
+
+#################################################
+# TASK: TRIVY FS
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trivy-fs
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: scan
+    image: aquasec/trivy:0.69.3
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      trivy filesystem \
+        --format json \
+        --output /workspace/security-reports/trivy-fs.json \
+        .
+
+#################################################
+# TASK: HADOLINT
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: hadolint
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: lint
+    image: hadolint/hadolint:v2.12.0
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      hadolint Dockerfile -f sarif > /workspace/security-reports/hadolint.sarif
+
+#################################################
+# TASK: CONFTEST DOCKERFILE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: conftest-docker
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: conftest
+    image: openpolicyagent/conftest:v0.58.0
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      conftest test Dockerfile --policy . --output json > /workspace/security-reports/conftest-docker.json
+
+#################################################
+# TASK: CONFTEST K8S
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: conftest-k8s
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: conftest
+    image: openpolicyagent/conftest:v0.58.0
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      conftest test k8s_deployment_service.yaml --policy . --output json > /workspace/security-reports/conftest-k8s.json
+
+#################################################
+# TASK: CHECKOV
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: checkov-iac
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: scan
+    image: bridgecrew/checkov:3.2.299
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      checkov -d Terraform --output json --output-file-path /workspace/security-reports/checkov.json
+
+#################################################
+# TASK: BUILD IMAGE ARCHIVE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: kaniko-build-archive
+  namespace: tekton-devsecops
+spec:
+  params:
+  - name: image
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: build
+    image: gcr.io/kaniko-project/executor:v1.23.2
+    args:
+    - --dockerfile=$(workspaces.source.path)/Dockerfile
+    - --context=$(workspaces.source.path)
+    - --destination=$(params.image)
+    - --no-push
+    - --tarPath=/workspace/security-reports/app-image.tar
+
+#################################################
+# TASK: TRIVY IMAGE ARCHIVE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trivy-image-archive
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: scan
+    image: aquasec/trivy:0.69.3
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      trivy image \
+        --input /workspace/security-reports/app-image.tar \
+        --format sarif \
+        --output /workspace/security-reports/trivy-image.sarif
+
+#################################################
+# TASK: IMAGE SBOM FROM ARCHIVE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: syft-image-sbom
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: generate-image-sbom
+    image: anchore/syft:v1.20.0
+    script: |
+      set -eu
+      /syft oci-archive:/workspace/security-reports/app-image.tar \
+        -o cyclonedx-json=/workspace/security-reports/sbom-image.json
+
+#################################################
+# TASK: K8S SECURITY
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: k8s-security
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: kubesec
+    image: kubesec/kubesec:v2
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      mkdir -p /workspace/security-reports
+      kubesec scan k8s_deployment_service.yaml > /workspace/security-reports/kubesec.json
+  - name: trivy-config
+    image: aquasec/trivy:0.69.3
+    workingDir: $(workspaces.source.path)
+    script: |
+      set -eu
+      trivy config \
+        --format json \
+        --output /workspace/security-reports/trivy-config.json \
+        k8s_deployment_service.yaml
+
+#################################################
+# TASK: SECURITY REPORT SUMMARY
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: security-report-summary
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: security-reports
+    mountPath: /workspace/security-reports
+  steps:
+  - name: summarize
+    image: alpine:3.20.3
+    script: |
+      set -eu
+      echo "Security reports generated:"
+      find /workspace/security-reports -maxdepth 1 -type f | sort
+
+#################################################
+# TASK: SLACK
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: slack-notify
+  namespace: tekton-devsecops
+spec:
+  params:
+  - name: message
+  steps:
+  - name: slack
+    image: curlimages/curl:8.12.1
+    script: |
+      echo "Slack notification: $(params.message)"
+
+#################################################
+# OPTIONAL TASKS REQUIRING EXTRA SECRETS
+#################################################
+# defectdojo-secret and cosign-key are not created by Terraform/bootstrap.sh.
+# Keep these integrations disabled until those secrets are provisioned.
+#
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: upload-security-reports
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: product-name
+#   - name: engagement-name
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   steps:
+#   - name: upload
+#     image: curlimages/curl:8.12.1
+#     env:
+#     - name: DD_URL
+#       valueFrom:
+#         secretKeyRef:
+#           name: defectdojo-secret
+#           key: url
+#     - name: DD_TOKEN
+#       valueFrom:
+#         secretKeyRef:
+#           name: defectdojo-secret
+#           key: token
+#     script: |
+#       set -eu
+#       for report in /workspace/security-reports/*; do
+#         [ -f "$report" ] || continue
+#         curl --fail --show-error --silent \
+#           -X POST "$DD_URL/api/v2/import-scan/" \
+#           -H "Authorization: Token $DD_TOKEN" \
+#           -H "accept: application/json" \
+#           -F "scan_type=SARIF" \
+#           -F "engagement_name=$(params.engagement-name)" \
+#           -F "product_name=$(params.product-name)" \
+#           -F "file=@$report"
+
+#           -F "scan_type=$(params.scan-type)" \
+#           -F "file=@$(params.scan-file)" \
+#           -F "product_name=DevSecOps-App" \
+#           -F "product_type_name=Applications" \
+#           -F "engagement_name=Tekton Pipeline" \
+#           -F "auto_create_context=true" \
+#           -F "active=true" \
+#           -F "verified=true" \
+#           -F "minimum_severity=Low"
+#       done
+#
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: cosign-sign-attest
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: image
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   volumes:
+#   - name: cosign-key
+#     secret:
+#       secretName: cosign-key
+#   stepTemplate:
+#     volumeMounts:
+#     - name: cosign-key
+#       mountPath: /etc/cosign
+#       readOnly: true
+#   steps:
+#   - name: sign
+#     image: ghcr.io/sigstore/cosign/cosign:v2.4.1
+#     env:
+#     - name: COSIGN_PASSWORD
+#       valueFrom:
+#         secretKeyRef:
+#           name: cosign-key
+#           key: password
+#     script: |
+#       set -eu
+#       cosign sign --key /etc/cosign/cosign.key $(params.image)
+
+#################################################
+# PIPELINE
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: devsecops-pipeline
+  namespace: tekton-devsecops
+spec:
+  workspaces:
+  - name: source-workspace
+  - name: maven-cache
+  - name: security-reports
+  params:
+  - name: repo-url
+  - name: revision
+    default: main
+  - name: image
+    default: local/devsecops-demo:ci
+  tasks:
+  - name: clone
+    taskRef:
+      name: git-clone
+    params:
+    - name: repo-url
+      value: $(params.repo-url)
+    - name: revision
+      value: $(params.revision)
+    workspaces:
+    - name: output
+      workspace: source-workspace
+
+  - name: compile
+    runAfter: [clone]
+    taskRef:
+      name: maven-compile
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: maven-cache
+      workspace: maven-cache
+
+  - name: secret-gitleaks
+    runAfter: [clone]
+    taskRef:
+      name: gitleaks
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: secret-trufflehog
+    runAfter: [clone]
+    taskRef:
+      name: trufflehog
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: hadolint
+    runAfter: [clone]
+    taskRef:
+      name: hadolint
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: conftest-docker
+    runAfter: [clone]
+    taskRef:
+      name: conftest-docker
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: checkov
+    runAfter: [clone]
+    taskRef:
+      name: checkov-iac
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: conftest-k8s
+    runAfter: [clone]
+    taskRef:
+      name: conftest-k8s
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: k8s-config-scan
+    runAfter: [clone]
+    taskRef:
+      name: k8s-security
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: unit-tests
+    runAfter: [compile]
+    taskRef:
+      name: unit-tests
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: maven-cache
+      workspace: maven-cache
+
+  - name: pit-tests
+    runAfter: [unit-tests]
+    taskRef:
+      name: pit-tests
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: maven-cache
+      workspace: maven-cache
+
+  - name: package
+    runAfter: [pit-tests]
+    taskRef:
+      name: maven-package
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: maven-cache
+      workspace: maven-cache
+
+  - name: sonar
+    runAfter: [package]
+    taskRef:
+      name: sonarqube-scan
+    workspaces:
+    - name: source
+      workspace: source-workspace
+
+  - name: source-sbom
+    runAfter: [package]
+    taskRef:
+      name: syft-source-sbom
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: sca
+    runAfter: [source-sbom]
+    taskRef:
+      name: grype-scan
+    workspaces:
+    - name: security-reports
+      workspace: security-reports
+
+  - name: trivy-fs
+    runAfter: [package]
+    taskRef:
+      name: trivy-fs
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: build-image-archive
+    runAfter:
+    - sonar
+    - sca
+    - trivy-fs
+    - secret-gitleaks
+    - secret-trufflehog
+    - hadolint
+    - conftest-docker
+    - checkov
+    - conftest-k8s
+    - k8s-config-scan
+    taskRef:
+      name: kaniko-build-archive
+    params:
+    - name: image
+      value: $(params.image)
+    workspaces:
+    - name: source
+      workspace: source-workspace
+    - name: security-reports
+      workspace: security-reports
+
+  - name: image-scan
+    runAfter: [build-image-archive]
+    taskRef:
+      name: trivy-image-archive
+    workspaces:
+    - name: security-reports
+      workspace: security-reports
+
+  - name: image-sbom
+    runAfter: [build-image-archive]
+    taskRef:
+      name: syft-image-sbom
+    workspaces:
+    - name: security-reports
+      workspace: security-reports
+
+  - name: summarize-security-reports
+    runAfter: [image-scan, image-sbom]
+    taskRef:
+      name: security-report-summary
+    workspaces:
+    - name: security-reports
+      workspace: security-reports
+
+  finally:
+  - name: notify
+    taskRef:
+      name: slack-notify
+    params:
+    - name: message
+      value: "DevSecOps pipeline finished"
+
+#################################################
+# PIPELINERUN
+#################################################
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: devsecops-run
+  namespace: tekton-devsecops
+spec:
+  pipelineRef:
+    name: devsecops-pipeline
+  taskRunTemplate:
+    serviceAccountName: tekton-devsecops-sa
+  workspaces:
+  - name: source-workspace
+    persistentVolumeClaim:
+      claimName: tekton-workspace
+  - name: maven-cache
+    persistentVolumeClaim:
+      claimName: maven-cache
+  - name: security-reports
+    persistentVolumeClaim:
+      claimName: security-reports
+  params:
+  - name: repo-url
+    value: https://github.com/0x70ssAM/devsecops
+  - name: revision
+    value: main
+  - name: image
+    value: local/devsecops-demo:ci
