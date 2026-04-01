@@ -410,9 +410,11 @@ spec:
       set -eu
       ls 
       ls -lah
+      ls -lah policy
       mkdir -p /workspace/security-reports
-      find . -name "k8s*.yaml" -exec conftest test {} \;
+      conftest test k8s*.yaml --policy policy
       conftest test k8s_deployment_service.yaml --policy policy --output json > /workspace/security-reports/conftest-k8s.json
+    # find . -name "k8s*.yaml" -exec conftest test {} \;
 #################################################
 # TASK: CHECKOV
 #################################################
