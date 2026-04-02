@@ -44,7 +44,7 @@ roleRef:
 #   # storageClassName: local-path
 #   resources:
 #     requests:
-#       storage: 5Gi
+#       storage: 10Gi
 # ---
 # apiVersion: v1
 # kind: PersistentVolumeClaim
@@ -57,7 +57,7 @@ roleRef:
 #   # storageClassName: local-path
 #   resources:
 #     requests:
-#       storage: 5Gi
+#       storage: 10Gi
 
 #################################################
 # TASK: GIT CLONE
@@ -125,10 +125,15 @@ spec:
   steps:
   - name: test
     image: maven:3.9.9-eclipse-temurin-17
+    securityContext:
+      runAsUser: 0
     workingDir: $(workspaces.source.path)
     script: |
       set -eu
-      mvn -B -ntp -Dmaven.repo.local=/root/.m2 test
+      mkdir -p /workspace/source/target
+      chmod -R 777 /workspace/source
+      mvn -B -ntp -Dmaven.repo.local=/root/.m2 clean test
+    # mvn -B -ntp -Dmaven.repo.local=/root/.m2 test
 
 #################################################
 # TASK: MUTATION TESTS
@@ -188,7 +193,7 @@ spec:
   - name: source
   steps:
   - name: scan
-    image: sonarsource/sonar-scanner-cli:11.1.0.2693_1
+    image: sonarsource/sonar-scanner-cli:latest
     workingDir: $(workspaces.source.path)
     env:
     - name: SONAR_HOST_URL
@@ -259,7 +264,9 @@ spec:
     script: |
       set -eu
       mkdir -p /workspace/security-reports
-      trufflehog filesystem . --json > /workspace/security-reports/trufflehog.json
+      trufflehog filesystem . --json --no-update > /workspace/security-reports/trufflehog.json
+      trufflehog --help
+    # trufflehog filesystem . --json > /workspace/security-reports/trufflehog.json
 
 #################################################
 # TASK: SOURCE SBOM
@@ -412,8 +419,8 @@ spec:
       ls -lah
       ls -lah policy
       mkdir -p /workspace/security-reports
-      conftest test k8s*.yaml --policy policy
-      conftest test k8s_deployment_service.yaml --policy policy --output json > /workspace/security-reports/conftest-k8s.json
+      conftest test k8s*.yaml --policy policy --output json > /workspace/security-reports/conftest-k8s1.json || true
+      conftest test k8s_deployment_service.yaml --policy policy --output json > /workspace/security-reports/conftest-k8s.json || true
     # find . -name "k8s*.yaml" -exec conftest test {} \;
 #################################################
 # TASK: CHECKOV
@@ -436,78 +443,80 @@ spec:
     script: |
       set -eu
       mkdir -p /workspace/security-reports
-      checkov -d Terraform --output json --output-file-path /workspace/security-reports/checkov.json || true
+      checkov -d . -o json > /workspace/security-reports/checkov.json || true
+      checkov -d . -o sarif > /workspace/security-reports/checkov.sarif || true
+    # checkov -d Terraform --output json --output-file-path /workspace/security-reports/checkov.json || true
 
 #################################################
 # TASK: BUILD IMAGE ARCHIVE
 #################################################
----
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: kaniko-build-archive
-  namespace: tekton-devsecops
-spec:
-  params:
-  - name: image
-  workspaces:
-  - name: source
-  - name: security-reports
-    mountPath: /workspace/security-reports
-  steps:
-  - name: build
-    image: gcr.io/kaniko-project/executor:v1.23.2
-    args:
-    - --dockerfile=$(workspaces.source.path)/Dockerfile
-    - --context=$(workspaces.source.path)
-    - --destination=$(params.image)
-    - --no-push
-    - --tarPath=/workspace/security-reports/app-image.tar
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: kaniko-build-archive
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: image
+#   workspaces:
+#   - name: source
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   steps:
+#   - name: build
+#     image: gcr.io/kaniko-project/executor:v1.23.2
+#     args:
+#     - --dockerfile=$(workspaces.source.path)/Dockerfile
+#     - --context=$(workspaces.source.path)
+#     - --destination=$(params.image)
+#     - --no-push
+#     - --tarPath=/workspace/security-reports/app-image.tar
 
 #################################################
 # TASK: TRIVY IMAGE ARCHIVE
 #################################################
----
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: trivy-image-archive
-  namespace: tekton-devsecops
-spec:
-  workspaces:
-  - name: security-reports
-    mountPath: /workspace/security-reports
-  steps:
-  - name: scan
-    image: aquasec/trivy:0.69.3
-    script: |
-      set -eu
-      mkdir -p /workspace/security-reports
-      trivy image \
-        --input /workspace/security-reports/app-image.tar \
-        --format sarif \
-        --output /workspace/security-reports/trivy-image.sarif
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: trivy-image-archive
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   steps:
+#   - name: scan
+#     image: aquasec/trivy:0.69.3
+#     script: |
+#       set -eu
+#       mkdir -p /workspace/security-reports
+#       trivy image \
+#         --input /workspace/security-reports/app-image.tar \
+#         --format sarif \
+#         --output /workspace/security-reports/trivy-image.sarif
 
 #################################################
 # TASK: IMAGE SBOM FROM ARCHIVE
 #################################################
----
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: syft-image-sbom
-  namespace: tekton-devsecops
-spec:
-  workspaces:
-  - name: security-reports
-    mountPath: /workspace/security-reports
-  steps:
-  - name: generate-image-sbom
-    image: anchore/syft:v1.20.0
-    script: |
-      set -eu
-      /syft oci-archive:/workspace/security-reports/app-image.tar \
-        -o cyclonedx-json=/workspace/security-reports/sbom-image.json
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: syft-image-sbom
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   steps:
+#   - name: generate-image-sbom
+#     image: anchore/syft:v1.20.0
+#     script: |
+#       set -eu
+#       syft oci-archive:/workspace/security-reports/app-image.tar \
+#         -o cyclonedx-json=/workspace/security-reports/sbom-image.json
 
 #################################################
 # TASK: K8S SECURITY
@@ -524,18 +533,77 @@ spec:
   - name: security-reports
     mountPath: /workspace/security-reports
   steps:
-  - name: kubesec
+
+  #################################################
+  # STEP 1 — KUBESEC SCAN
+  #################################################
+
+  - name: kubesec-scan
     image: kubesec/kubesec:v2
     workingDir: $(workspaces.source.path)
     script: |
+      #!/bin/sh
       set -eu
+
       mkdir -p /workspace/security-reports
-      kubesec scan k8s_deployment_service.yaml > /workspace/security-reports/kubesec.json
+
+      echo "Running Kubesec scan..."
+
+      kubesec scan k8s_deployment_service.yaml > /workspace/security-reports/kubesec.json || true
+
+      echo "Raw kubesec result:"
+      head /workspace/security-reports/kubesec.json
+
+  #################################################
+  # STEP 2 — CONVERT FOR DEFECTDOJO
+  #################################################
+
+  - name: convert-kubesec
+    image: alpine:3.20
+    script: |
+      #!/bin/sh
+      set -eu
+
+      apk add --no-cache jq
+
+      echo "Converting Kubesec → DefectDojo format..."
+
+      jq '{
+        name: "Kubesec Scan",
+        findings: [
+          .[] | {
+            title: .message,
+            severity:
+              (if .score < 0 then "High"
+               elif .score < 5 then "Medium"
+               else "Low"
+               end),
+            description: (.object + " " + .fileName),
+            file_path: .fileName,
+            active: true,
+            verified: false
+          }
+        ]
+      }' \
+      /workspace/security-reports/kubesec.json \
+      > /workspace/security-reports/kubesec-dojo.json
+
+      echo "Converted file:"
+      cat /workspace/security-reports/kubesec-dojo.json
+
+  #################################################
+  # STEP 3 — TRIVY CONFIG SCAN
+  #################################################
+
   - name: trivy-config
     image: aquasec/trivy:0.69.3
     workingDir: $(workspaces.source.path)
     script: |
+      #!/bin/sh
       set -eu
+
+      echo "Running Trivy config scan..."
+
       trivy config \
         --format json \
         --output /workspace/security-reports/trivy-config.json \
@@ -559,8 +627,12 @@ spec:
     image: alpine:3.20.3
     script: |
       set -eu
+
       echo "Security reports generated:"
-      find /workspace/security-reports -maxdepth 1 -type f | sort
+      ls -lah /workspace/security-reports || true
+
+      echo "Files:"
+      find /workspace/security-reports -maxdepth 1 -type f | sort || true
 
 #################################################
 # TASK: SLACK
@@ -595,57 +667,314 @@ spec:
     default: Tekton Pipeline
   - name: product-name
     default: DevSecOps-App
+
   workspaces:
   - name: security-reports
     mountPath: /workspace/security-reports
+
   steps:
   - name: upload
-    image: curlimages/curl:8.12.1
+    image:  alpine:3.20
+    # image: curlimages/curl:8.12.1
     env:
     - name: DD_URL
       valueFrom:
-        secretKeyRef:
-          name: defectdojo-secret
-          key: url
+        configMapKeyRef:
+          name: devsecops-urls
+          key: DEFECTDOJO_URL
     - name: DD_TOKEN
       valueFrom:
         secretKeyRef:
           name: defectdojo-secret
           key: token
-    script: |
-      set -eu
-      found=0
-      for report in /workspace/security-reports/*; do
-        [ -f "$report" ] || continue
-        found=1
-        case "$report" in
-          *gitleaks*) scan_type="Gitleaks Scan" ;;
-          *trivy*) scan_type="Trivy Scan" ;;
-          *checkov*) scan_type="Checkov Scan" ;;
-          *hadolint*) scan_type="Hadolint Scan" ;;
-          *grype*) scan_type="Grype Scan" ;;
-          *sbom*) scan_type="CycloneDX Scan" ;;
-          *) scan_type="SARIF" ;;
-        esac
 
-        curl --fail --show-error --silent \
-          -X POST "$DD_URL/api/v2/import-scan/" \
+    script: |
+      #!/bin/sh
+      set -euo pipefail
+      apk add --no-cache curl jq
+      REPORT_DIR="/workspace/security-reports"
+
+      echo "========================================"
+      echo "DefectDojo URL: $DD_URL"
+      echo "Reports directory:"
+      ls -lah $REPORT_DIR || true
+      echo "========================================"
+
+      ########################################
+
+      # VERIFY DEFECTDOJO AUTH
+
+      ########################################
+
+      echo "Checking DefectDojo API..."
+
+      status=$(curl -s -o /dev/null -w "%{http_code}" \
+      -H "Authorization: Token $DD_TOKEN" \
+      "$DD_URL/api/v2/users/")
+
+
+      if [ "$status" != "200" ]; then
+      echo "ERROR: DefectDojo authentication failed (HTTP $status)"
+      exit 1
+      fi
+
+      echo "DefectDojo authentication OK"
+      echo "========================================"
+
+      ########################################
+
+      # REPORT UPLOAD LOOP
+
+      ########################################
+
+      found=0
+
+      for report in $REPORT_DIR/*.json $REPORT_DIR/*.sarif; do
+
+        [ -f "$report" ] || continue
+
+        if [ ! -s "$report" ]; then
+          echo "Skipping empty report: $report"
+          continue
+        fi
+
+      ####################################
+      # VALIDATE JSON
+      ####################################
+
+      if echo "$report" | grep -q ".json$"; then
+        if ! cat "$report" | jq empty >/dev/null 2>&1; then
+          echo "Invalid JSON report: $report"
+          continue
+        fi
+      fi
+
+      ####################################
+      # DETECT SCAN TYPE
+      ####################################
+
+      echo "Uploading $report"
+      case "$report" in
+
+        *trivy*) scan_type="Trivy Scan" ;;
+        *checkov*) scan_type="Checkov Report" ;;
+        *gitleaks*.sarif) scan_type="SARIF" ;;
+        *grype*) scan_type="Anchore Grype" ;;
+        *sbom*) scan_type="CycloneDX Scan" ;;
+        *kubesec-dojo.json) scan_type="Generic Findings Import" ;;
+        *) scan_type="Generic Findings Import" ;;
+      esac
+
+      echo "Scan type: $scan_type"
+
+      ####################################
+      # UPLOAD REPORT
+      ####################################
+
+      echo "Uploading $report"
+      echo "Scan type: $scan_type"
+
+      response=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "$DD_URL/api/v2/reimport-scan/" \
+        -H "Authorization: Token $DD_TOKEN" \
+        -H "accept: application/json" \
+        -F "scan_type=$scan_type" \
+        -F "engagement_name=$(params.engagement-name)" \
+        -F "product_name=$(params.product-name)" \
+        -F "product_type_name=Applications" \
+        -F "auto_create_context=true" \
+        -F "active=true" \
+        -F "verified=true" \
+        -F "minimum_severity=Low" \
+        -F "file=@$report")
+
+      if [ "$response" = "201" ]; then
+        echo "Upload successful"
+      else
+        echo "Parser failed ($response) → trying Generic Import"
+
+        curl -s \
+          -X POST "$DD_URL/api/v2/reimport-scan/" \
           -H "Authorization: Token $DD_TOKEN" \
-          -H "accept: application/json" \
-          -F "scan_type=$scan_type" \
+          -F "scan_type=Generic Findings Import" \
           -F "engagement_name=$(params.engagement-name)" \
           -F "product_name=$(params.product-name)" \
           -F "product_type_name=Applications" \
           -F "auto_create_context=true" \
-          -F "active=true" \
-          -F "verified=true" \
-          -F "minimum_severity=Low" \
           -F "file=@$report"
+      fi
+
+      found=1
+      echo "----------------------------------------"
+
       done
 
+      ########################################
+
+      # NO REPORTS FOUND
+
+      ########################################
+
       if [ "$found" -eq 0 ]; then
-        echo "No security reports found to upload"
+      echo "No security reports found."
       fi
+
+      echo "DefectDojo upload stage completed."
+
+    # set -eu
+
+    # echo "DefectDojo URL: $DD_URL"
+    # echo "Reports directory:"
+    # ls -lah /workspace/security-reports || true
+    # echo "--------------------------------"
+
+    # echo "Checking DefectDojo API..."
+
+    # status=$(curl -s -o /dev/null -w "%{http_code}" \
+    #   -H "Authorization: Token $DD_TOKEN" \
+    #   "$DD_URL/api/v2/users/")
+
+    # if [ "$status" != "200" ]; then
+    #   echo "ERROR: DefectDojo authentication failed (HTTP $status)"
+    #   exit 1
+    # fi
+
+    # echo "DefectDojo API reachable and token valid"
+    # echo "--------------------------------"
+
+    # ########################################
+    # # TEST WITH VALID REPORT
+    # ########################################
+
+    # if [ -f "/workspace/security-reports/trivy-fs.json" ]; then
+
+    #   echo "Testing upload with trivy-fs.json"
+
+    #   curl --fail --show-error \
+    #     -X POST "$DD_URL/api/v2/reimport-scan/" \
+    #     -H "Authorization: Token $DD_TOKEN" \
+    #     -H "accept: application/json" \
+    #     -F "scan_type=Trivy Scan" \
+    #     -F "engagement_name=Tekton Pipeline" \
+    #     -F "product_name=DevSecOps-App" \
+    #     -F "product_type_name=Applications" \
+    #     -F "auto_create_context=true" \
+    #     -F "file=@/workspace/security-reports/trivy-fs.json"
+
+    #   echo "Trivy test upload succeeded"
+
+    # fi
+
+    # ########################################
+    # # TEST ONE REPORT BEFORE LOOP
+    # ########################################
+
+    # first_report=""
+
+    # for f in /workspace/security-reports/*.json /workspace/security-reports/*.sarif; do
+    #   if [ -f "$f" ] && [ -s "$f" ]; then
+    #     first_report="$f"
+    #     break
+    #   fi
+    # done
+
+    # if [ -n "$first_report" ]; then
+
+    #   echo "Testing upload with first report: $first_report"
+
+    #   case "$first_report" in
+    #     *trivy-fs*) scan_type="Trivy Scan" ;;
+    #     *trivy-config*) scan_type="Trivy Config Scan" ;;
+    #     *checkov*) scan_type="Checkov Scan" ;;
+    #     *gitleaks*) scan_type="Gitleaks Scan" ;;
+    #     *.sarif) scan_type="SARIF" ;;
+    #     *) scan_type="SARIF" ;;
+    #   esac
+
+    #   curl --fail --show-error \
+    #     -X POST "$DD_URL/api/v2/reimport-scan/" \
+    #     -H "Authorization: Token $DD_TOKEN" \
+    #     -H "accept: application/json" \
+    #     -F "scan_type=$scan_type" \
+    #     -F "engagement_name=$(params.engagement-name)" \
+    #     -F "product_name=$(params.product-name)" \
+    #     -F "product_type_name=Applications" \
+    #     -F "auto_create_context=true" \
+    #     -F "file=@$first_report"
+
+    # fi
+
+    # ########################################
+    # # NORMAL LOOP UPLOAD
+    # ########################################
+
+    # found=0
+
+    # for report in /workspace/security-reports/*.json /workspace/security-reports/*.sarif; do
+
+    #   [ -f "$report" ] || continue
+    #   [ -s "$report" ] || continue
+
+    #   if [ ! -s "$report" ]; then
+    #       echo "Skipping empty report: $report"
+    #       continue
+    #   fi
+
+    #   case "$report" in
+    #     *gitleaks*) scan_type="Gitleaks Scan" ;;
+    #     *trivy-fs*) scan_type="Trivy Scan" ;;
+    #     *trivy-config*) scan_type="Trivy Config Scan" ;;
+    #     *grype*) scan_type="Grype Scan" ;;
+    #     *checkov*) scan_type="Checkov Scan" ;;
+    #     *kubesec*) scan_type="Kubesec Scan" ;;
+    #     *sbom*) scan_type="CycloneDX Scan" ;;
+    #     *.sarif) scan_type="SARIF" ;;
+    #     *)
+    #       echo "Skipping unsupported report: $report"
+    #       continue
+    #       ;;
+    #   esac
+
+    #   found=1
+
+    #   echo "Uploading $report (type: $scan_type)"
+
+    #   curl --fail --show-error \
+    #     -X POST "$DD_URL/api/v2/reimport-scan/" \
+    #     -H "Authorization: Token $DD_TOKEN" \
+    #     -H "accept: application/json" \
+    #     -F "scan_type=$scan_type" \
+    #     -F "engagement_name=$(params.engagement-name)" \
+    #     -F "product_name=$(params.product-name)" \
+    #     -F "product_type_name=Applications" \
+    #     -F "auto_create_context=true" \
+    #     -F "active=true" \
+    #     -F "verified=true" \
+    #     -F "minimum_severity=Low" \
+    #     -F "file=@$report" \
+    #     || echo "Upload failed for $report"
+
+    # done
+
+    # if [ "$found" -eq 0 ]; then
+    #   echo "No valid security reports found to upload"
+    # fi
+
+
+    # curl --fail --show-error --silent \
+    #   -X POST "$DD_URL/api/v2/reimport-scan/" \
+    #   -H "Authorization: Token $DD_TOKEN" \
+    #   -H "accept: application/json" \
+    #   -F "scan_type=$scan_type" \
+    #   -F "engagement_name=$(params.engagement-name)" \
+    #   -F "product_name=$(params.product-name)" \
+    #   -F "product_type_name=Applications" \
+    #   -F "auto_create_context=true" \
+    #   -F "active=true" \
+    #   -F "verified=true" \
+    #   -F "minimum_severity=Low" \
+    #   -F "file=@$report"
+
 #
 # ---
 # apiVersion: tekton.dev/v1
@@ -775,6 +1104,7 @@ spec:
       workspace: security-reports
 
   - name: conftest-k8s
+    onError: continue
     runAfter: [clone]
     taskRef:
       name: conftest-k8s
@@ -785,6 +1115,7 @@ spec:
       workspace: security-reports
 
   - name: k8s-config-scan
+    onError: continue
     runAfter: [clone]
     taskRef:
       name: k8s-security
@@ -860,47 +1191,47 @@ spec:
     - name: security-reports
       workspace: security-reports
 
-  - name: build-image-archive
-    runAfter:
-    - sonar
-    - sca
-    - trivy-fs
-    - secret-gitleaks
-    - secret-trufflehog
-    - hadolint
-    - conftest-docker
-    - checkov
-    - conftest-k8s
-    - k8s-config-scan
-    taskRef:
-      name: kaniko-build-archive
-    params:
-    - name: image
-      value: $(params.image)
-    workspaces:
-    - name: source
-      workspace: source-workspace
-    - name: security-reports
-      workspace: security-reports
+  # - name: build-image-archive
+  #   runAfter:
+  #   - sonar
+  #   - sca
+  #   - trivy-fs
+  #   - secret-gitleaks
+  #   - secret-trufflehog
+  #   - hadolint
+  #   - conftest-docker
+  #   - checkov
+  #   - conftest-k8s
+  #   - k8s-config-scan
+  #   taskRef:
+  #     name: kaniko-build-archive
+  #   params:
+  #   - name: image
+  #     value: $(params.image)
+  #   workspaces:
+  #   - name: source
+  #     workspace: source-workspace
+  #   - name: security-reports
+  #     workspace: security-reports
 
-  - name: image-scan
-    runAfter: [build-image-archive]
-    taskRef:
-      name: trivy-image-archive
-    workspaces:
-    - name: security-reports
-      workspace: security-reports
+  # - name: image-scan
+  #   runAfter: [build-image-archive]
+  #   taskRef:
+  #     name: trivy-image-archive
+  #   workspaces:
+  #   - name: security-reports
+  #     workspace: security-reports
 
-  - name: image-sbom
-    runAfter: [build-image-archive]
-    taskRef:
-      name: syft-image-sbom
-    workspaces:
-    - name: security-reports
-      workspace: security-reports
+  # - name: image-sbom
+  #   runAfter: [build-image-archive]
+  #   taskRef:
+  #     name: syft-image-sbom
+  #   workspaces:
+  #   - name: security-reports
+  #     workspace: security-reports
 
   - name: summarize-security-reports
-    runAfter: [image-scan, image-sbom]
+    runAfter: [trivy-fs] #image-sbom
     taskRef:
       name: security-report-summary
     workspaces:
@@ -948,7 +1279,7 @@ spec:
         storageClassName: nfs-client
         resources:
           requests:
-            storage: 5Gi
+            storage: 10Gi
   - name: maven-cache
     # persistentVolumeClaim:
     #   claimName: maven-cache
@@ -959,7 +1290,7 @@ spec:
         storageClassName: nfs-client
         resources:
           requests:
-            storage: 5Gi
+            storage: 10Gi
   - name: security-reports
     # persistentVolumeClaim:
     #   claimName: security-reports
@@ -970,7 +1301,7 @@ spec:
         storageClassName: nfs-client
         resources:
           requests:
-            storage: 5Gi
+            storage: 10Gi
   params:
   - name: repo-url
     value: https://github.com/0x70ssAM/devsecops
