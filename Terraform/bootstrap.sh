@@ -15,6 +15,15 @@ K8S_VERSION="v1.35"
 POD_CIDR="10.244.0.0/16"
 MAX_RETRIES=5
 SLEEP_SECONDS=15
+WAIT_TIMEOUT=600
+
+########################################
+# Secure Credentials (from Terraform env)
+########################################
+DEFECTDOJO_ADMIN_PASS="${DEFECTDOJO_ADMIN_PASS:-$(openssl rand -base64 18)}"
+SONARQUBE_MON_PASS="${SONARQUBE_MON_PASS:-$(openssl rand -base64 18)}"
+SONARQUBE_ADMIN_PASS="${SONARQUBE_ADMIN_PASS:-$(openssl rand -base64 18)}"
+SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 ########################################
 # Helpers
 ########################################
@@ -279,6 +288,7 @@ kubectl create configmap devsecops-urls \
   --from-literal=DEFECTDOJO_URL=https://$DEFECTDOJO_URL \
   --from-literal=JENKINS_URL=https://$JENKINS_URL \
   --from-literal=ARGOCD_URL=https://$ARGOCD_URL \
+  --from-literal=ARGOCD_SERVER=$ARGOCD_URL \
   --from-literal=TEKTON_URL=https://$TEKTON_URL \
   --dry-run=client -o yaml | kubectl apply -f -
 
@@ -655,6 +665,7 @@ helm repo update
 #   --from-literal=valkey-password=StrongRedisPass123 \
 #   --dry-run=client -o yaml | kubectl apply -f -
 
+  # --set admin.password=Admin@123 \
 helm upgrade --install defectdojo defectdojo/defectdojo \
   -n defectdojo \
   --create-namespace \
@@ -662,7 +673,7 @@ helm upgrade --install defectdojo defectdojo/defectdojo \
   --set createValkeySecret=true \
   --set createPostgresqlSecret=true \
   --set admin.user=admin \
-  --set admin.password=Admin@123 \
+  --set admin.password="$DEFECTDOJO_ADMIN_PASS" \
   --set admin.mail=admin@local \
   --set certmanager.enabled=true \
   --set django.ingress.enabled=true \
@@ -759,6 +770,126 @@ EOF
 check_cert "$ARGOCD_NS" "$ARGOCD_TLS"
 
 ########################################
+# ArgoCD GitOps — Project + Application
+########################################
+log "Configuring ArgoCD GitOps deployment"
+
+# Create the dev namespace for application deployment
+kubectl create namespace dev 2>/dev/null || true
+
+# ArgoCD Project — scopes what the app can access
+cat <<'EOF' | kubectl apply -f -
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: devsecops-project
+  namespace: argocd
+spec:
+  description: "DevSecOps platform project"
+  sourceRepos:
+  - "https://github.com/0x70ssAM/devsecops"
+  - "https://github.com/0x70ssAM/devsecops.git"
+  destinations:
+  - namespace: dev
+    server: https://kubernetes.default.svc
+  - namespace: default
+    server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  namespaceResourceWhitelist:
+  - group: '*'
+    kind: '*'
+EOF
+
+echo "✅ ArgoCD Project 'devsecops-project' created"
+
+# ArgoCD Application — watches the GitOps repo
+cat <<'EOF' | kubectl apply -f -
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devsecops-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: devsecops
+spec:
+  project: devsecops-project
+  source:
+    repoURL: https://github.com/0x70ssAM/devsecops
+    targetRevision: main
+    path: .
+    directory:
+      include: "k8s_deployment_service.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 60s
+EOF
+
+echo "✅ ArgoCD Application 'devsecops-app' created"
+
+########################################
+# Git Credentials for Tekton GitOps Push
+########################################
+GIT_USERNAME="${GIT_USERNAME:-tekton-bot}"
+GIT_TOKEN="${GIT_TOKEN:-}"
+
+if [ -n "$GIT_TOKEN" ]; then
+  log "Creating git-credentials secret for Tekton"
+  kubectl create secret generic git-credentials \
+    --from-literal=username="$GIT_USERNAME" \
+    --from-literal=token="$GIT_TOKEN" \
+    -n tekton-devsecops \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "✅ git-credentials secret created"
+else
+  warn "GIT_TOKEN not set — Tekton GitOps push will not work until git-credentials secret is created manually:"
+  warn "  kubectl create secret generic git-credentials \\"
+  warn "    --from-literal=username=YOUR_USER \\"
+  warn "    --from-literal=token=YOUR_GITHUB_PAT \\"
+  warn "    -n tekton-devsecops"
+fi
+
+########################################
+# DockerHub Credentials for Kaniko Push
+########################################
+DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
+DOCKERHUB_TOKEN="${DOCKERHUB_TOKEN:-}"
+
+if [ -n "$DOCKERHUB_TOKEN" ] && [ -n "$DOCKERHUB_USERNAME" ]; then
+  log "Creating dockerhub-secret for Kaniko"
+  kubectl create secret docker-registry dockerhub-secret \
+    --docker-server=https://index.docker.io/v1/ \
+    --docker-username="$DOCKERHUB_USERNAME" \
+    --docker-password="$DOCKERHUB_TOKEN" \
+    --docker-email=dummy@example.com \
+    -n tekton-devsecops \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "✅ dockerhub-secret created"
+else
+  warn "DOCKERHUB_TOKEN or DOCKERHUB_USERNAME not set — Kaniko push will not work until dockerhub-secret is created manually:"
+  warn "  kubectl create secret docker-registry dockerhub-secret \\"
+  warn "    --docker-server=https://index.docker.io/v1/ \\"
+  warn "    --docker-username=YOUR_DOCKERHUB_USER \\"
+  warn "    --docker-password=YOUR_DOCKERHUB_TOKEN \\"
+  warn "    --docker-email=dummy@example.com \\"
+  warn "    -n tekton-devsecops"
+fi
+
+########################################
 # SonarQube
 ########################################
 log "Installing SonarQube"
@@ -770,7 +901,7 @@ kubectl create namespace sonarqube 2>/dev/null || true
 
 kubectl create secret generic sonarqube-monitoring-passcode \
   -n sonarqube \
-  --from-literal=monitoring-passcode=demo123 \
+  --from-literal=monitoring-passcode="$SONARQUBE_MON_PASS" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install sonarqube sonarqube/sonarqube \
@@ -1140,6 +1271,12 @@ echo "Creating passwords file..."
 
 ARGOCD_PASS=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
 
+
+kubectl create secret generic argo-pass \
+  --from-literal=password=$(kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d) \
+  -n tekton-devsecops
+
 JENKINS_PASS=$(sudo cat /var/lib/jenkins/secrets/initialAdminPassword)
 
 sudo mkdir -p /etc/devsecops
@@ -1151,19 +1288,35 @@ sudo bash -c "cat > /etc/devsecops/passwords.json" <<EOF
 }
 EOF
 
+sudo chown hossam:hossam /etc/devsecops/passwords.json
 sudo chmod 644 /etc/devsecops/passwords.json
 ########################################
-# 
+# Wait for SonarQube (with timeout)
 ########################################
 echo "Waiting for SonarQube..."
 
+SONA_ELAPSED=0
 until curl -s https://$SONAR_URL/api/system/status | grep -q '"status":"UP"'; do
   sleep 5
+  SONA_ELAPSED=$((SONA_ELAPSED + 5))
+  if [ "$SONA_ELAPSED" -ge "$WAIT_TIMEOUT" ]; then
+    echo "⚠ SonarQube did not become ready within ${WAIT_TIMEOUT}s"
+    break
+  fi
 done
 
 echo "SonarQube ready"
 
-SONAR_TOKEN=$(curl -s -L -u 'admin:admin' -X POST --data-urlencode "name=tekton-token1" https://$SONAR_URL/api/user_tokens/generate | jq -r '.token')
+# SONAR_TOKEN=$(curl -s -L -u 'admin:admin' -X POST --data-urlencode "name=tekton-token1" https://$SONAR_URL/api/user_tokens/generate | jq -r '.token')
+
+# Change SonarQube default password to generated one
+curl -s -L -u "admin:admin" -X POST \
+  --data-urlencode "login=admin" \
+  --data-urlencode "previousPassword=admin" \
+  --data-urlencode "password=$SONARQUBE_ADMIN_PASS" \
+  "https://$SONAR_URL/api/users/change_password" || true
+
+SONAR_TOKEN=$(curl -s -L -u "admin:$SONARQUBE_ADMIN_PASS" -X POST --data-urlencode "name=tekton-token1" https://$SONAR_URL/api/user_tokens/generate | jq -r '.token')
 
 # Generate Sonar Secret for Auth
 kubectl create secret generic sonar-secret \
@@ -1175,12 +1328,19 @@ kubectl create secret generic sonar-secret \
 ########################################
 DD_URL="https://${DEFECTDOJO_URL}"
 DD_USER="admin"
-DD_PASS="Admin@123"
+# DD_PASS="Admin@123"
+DD_PASS="$DEFECTDOJO_ADMIN_PASS"
 
 echo "Waiting for DefectDojo..."
 
+DD_ELAPSED=0
 until [ "$(curl -sk -o /dev/null -w "%{http_code}" "$DD_URL/api/v2/oa3/schema/?format=json")" = "200" ]; do
   sleep 5
+  DD_ELAPSED=$((DD_ELAPSED + 5))
+  if [ "$DD_ELAPSED" -ge "$WAIT_TIMEOUT" ]; then
+    echo "⚠ DefectDojo did not become ready within ${WAIT_TIMEOUT}s"
+    break
+  fi
 done
 
 echo "DefectDojo ready"
@@ -1196,19 +1356,49 @@ kubectl create secret generic defectdojo-secret \
   -n tekton-devsecops \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# # Upload Sample Test
-# SCAN_TYPE=$1
-# REPORT_FILE=$2
+########################################
+# Create Slack Webhook Secret
+########################################
+if [ -n "$SLACK_WEBHOOK_URL" ]; then
+  log "Creating Slack webhook secret"
+  kubectl create secret generic slack-webhook-secret \
+    --from-literal=url="$SLACK_WEBHOOK_URL" \
+    -n tekton-devsecops \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "✅ Slack webhook secret created"
+else
+  warn "SLACK_WEBHOOK_URL not set — Slack notifications will be local-only"
+fi
 
-# curl -k -X POST "$DD_URL/api/v2/import-scan/" \
-#   -H "Authorization: Token $DD_TOKEN" \
-#   -H "accept: application/json" \
-#   -F "scan_type=$SCAN_TYPE" \
-#   -F "file=@$REPORT" \
-#   -F "product_name=DevSecOps-App" \
-#   -F "product_type_name=Applications" \
-#   -F "engagement_name=Tekton Pipeline" \
-#   -F "auto_create_context=true" \
-#   -F "active=true" \
-#   -F "verified=true" \
-#   -F "minimum_severity=Low"
+########################################
+# Generate Cosign Signing Key
+########################################
+log "Generating Cosign signing key for image signing"
+
+if ! command -v cosign &>/dev/null; then
+  COSIGN_VERSION="v2.4.1"
+  curl -sL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
+  chmod +x /usr/local/bin/cosign
+fi
+
+COSIGN_DIR=$(mktemp -d)
+COSIGN_PASSWORD=$(openssl rand -hex 16)
+
+pushd "$COSIGN_DIR" > /dev/null
+COSIGN_PASSWORD="$COSIGN_PASSWORD" cosign generate-key-pair 2>/dev/null || true
+popd > /dev/null
+
+if [ -f "$COSIGN_DIR/cosign.key" ]; then
+  kubectl create secret generic cosign-key \
+    --from-file=cosign.key="$COSIGN_DIR/cosign.key" \
+    --from-file=cosign.pub="$COSIGN_DIR/cosign.pub" \
+    --from-literal=password="$COSIGN_PASSWORD" \
+    -n tekton-devsecops \
+    --dry-run=client -o yaml | kubectl apply -f -
+  echo "✅ Cosign signing key created"
+  rm -rf "$COSIGN_DIR"
+else
+  warn "Cosign key generation failed — image signing will be unavailable"
+fi
+
+echo "✅ Bootstrap completed successfully"

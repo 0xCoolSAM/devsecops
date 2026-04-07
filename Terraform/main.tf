@@ -6,11 +6,48 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 3.100"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
+
+  ############################################
+  # Remote Backend — Azure Storage
+  # Provides: state locking, team collaboration,
+  # encrypted state storage
+  ############################################
+  # backend "azurerm" {
+  #   resource_group_name  = "terraform-state-rg"
+  #   storage_account_name = "yourstatestorageacct"
+  #   container_name       = "tfstate"
+  #   key                  = "devsecops.terraform.tfstate"
+  #   # use_azuread_auth   = true  # Enable for AAD-based auth
+  # }
 }
 
 provider "azurerm" {
   features {}
+}
+
+############################################
+# Random Passwords (replace hardcoded secrets)
+############################################
+resource "random_password" "defectdojo_admin" {
+  length           = 24
+  special          = true
+  override_special = "!@#$%"
+}
+
+resource "random_password" "sonarqube_monitoring" {
+  length  = 24
+  special = false
+}
+
+resource "random_password" "sonarqube_admin" {
+  length           = 24
+  special          = true
+  override_special = "!@#$%"
 }
 
 ############################################
@@ -58,14 +95,15 @@ resource "azurerm_network_security_rule" "inbound_rules" {
     port => idx
   }
 
-  name                        = "port-${each.key}"
-  priority                    = 100 + each.value
-  direction                   = "Inbound"
-  access                      = "Allow"
-  protocol                    = "Tcp"
-  source_port_range           = "*"
-  destination_port_range      = each.key
-  source_address_prefix       = "*"
+  name                   = "port-${each.key}"
+  priority               = 100 + each.value
+  direction              = "Inbound"
+  access                 = "Allow"
+  protocol               = "Tcp"
+  source_port_range      = "*"
+  destination_port_range = each.key
+  source_address_prefix  = "*"
+  # source_address_prefix       = var.allowed_ip_cidr
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_resource_group.rg.name
   network_security_group_name = azurerm_network_security_group.nsg.name
@@ -73,14 +111,15 @@ resource "azurerm_network_security_rule" "inbound_rules" {
 
 # NodePort range
 resource "azurerm_network_security_rule" "nodeports" {
-  name                        = "nodeports"
-  priority                    = 500
-  direction                   = "Inbound"
-  access                      = "Allow"
-  protocol                    = "Tcp"
-  source_port_range           = "*"
-  destination_port_range      = "30000-32767"
-  source_address_prefix       = "*"
+  name                   = "nodeports"
+  priority               = 500
+  direction              = "Inbound"
+  access                 = "Allow"
+  protocol               = "Tcp"
+  source_port_range      = "*"
+  destination_port_range = "30000-32767"
+  source_address_prefix  = "*"
+  # source_address_prefix       = var.allowed_ip_cidr
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_resource_group.rg.name
   network_security_group_name = azurerm_network_security_group.nsg.name
@@ -148,6 +187,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
   os_disk {
     caching              = "ReadWrite"
     storage_account_type = "Premium_LRS"
+    disk_size_gb = 256
   }
 
   source_image_reference {
@@ -205,31 +245,48 @@ resource "null_resource" "bootstrap" {
   }
 
   provisioner "file" {
-  source      = "Tekton/Full_tek.yaml"
-  destination = "/tmp/Full_tek.yaml"
+    source      = "Tekton/Full_tek.yaml"
+    destination = "/tmp/Full_tek.yaml"
   }
 
   provisioner "file" {
-  source      = "Tekton/Full_tek4.yaml"
-  destination = "/tmp/Full_tek4.yaml"
+    source      = "Tekton/Full_tek4.yaml"
+    destination = "/tmp/Full_tek4.yaml"
   }
-  
+
   provisioner "file" {
-  source      = "Tekton/Test_tek.yaml"
-  destination = "/tmp/Test_tek.yaml"
+    source      = "Tekton/Test_tek.yaml"
+    destination = "/tmp/Test_tek.yaml"
   }
 
   provisioner "remote-exec" {
     inline = [
       "chmod +x /tmp/bootstrap.sh",
-      "sudo bash /tmp/bootstrap.sh",
+      "sudo DEFECTDOJO_ADMIN_PASS='${random_password.defectdojo_admin.result}' SONARQUBE_MON_PASS='${random_password.sonarqube_monitoring.result}' SONARQUBE_ADMIN_PASS='${random_password.sonarqube_admin.result}' SLACK_WEBHOOK_URL='${var.slack_webhook_url}' GIT_TOKEN='${var.git_token}' GIT_USERNAME='${var.git_username}' DOCKERHUB_USERNAME='${var.dockerhub_username}' DOCKERHUB_TOKEN='${var.dockerhub_token}' DOCKERHUB_REPOSITORY='${var.dockerhub_repository}' bash /tmp/bootstrap.sh",
+      # "sudo bash /tmp/bootstrap.sh",
       "kubectl apply -f /tmp/Full_tek4.yaml"
+      # "kubectl create -f /tmp/Full_tek4.yaml"
     ]
   }
 }
 
 resource "null_resource" "fetch_passwords" {
   depends_on = [null_resource.bootstrap]
+
+  connection {
+    type     = "ssh"
+    host     = azurerm_public_ip.pip.ip_address
+    user     = var.admin_username
+    password = var.admin_password
+    timeout  = "2m"
+  }
+
+  # Verify the file exists before trying to fetch
+  provisioner "remote-exec" {
+    inline = [
+      "test -f /etc/devsecops/passwords.json && echo 'Passwords file found' || echo 'WARNING: passwords.json not found'"
+    ]
+  }
 
   provisioner "local-exec" {
     command = "sshpass -p '${var.admin_password}' scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${var.admin_username}@${azurerm_public_ip.pip.ip_address}:/etc/devsecops/passwords.json ./passwords.json"

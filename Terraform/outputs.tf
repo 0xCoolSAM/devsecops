@@ -4,6 +4,7 @@ output "public_ip" {
 
 output "ssh_command" {
   value = "ssh ${var.admin_username}@${azurerm_public_ip.pip.fqdn}"
+  # sensitive   = true
 }
 
 output "argocd_url" {
@@ -27,19 +28,27 @@ output "defectdojo_url" {
 }
 
 output "defectdojo_admin_password" {
-  description = "Admin password for DefectDojo"
-  value       = "Admin@123"
-  # sensitive   = true
+  description = "Auto-generated admin password for DefectDojo"
+  value       = random_password.defectdojo_admin.result
+  sensitive   = true
 }
 
 output "argocd_admin_password" {
-  value     = local.passwords.ARGOCD_PASSWORD
-  # sensitive = true
+  description = "ArgoCD initial admin password"
+  value       = local.passwords.ARGOCD_PASSWORD
+  sensitive   = true
 }
 
 output "jenkins_admin_password" {
-  value     = local.passwords.JENKINS_PASSWORD
-  # sensitive = true
+  description = "Jenkins initial admin password"
+  value       = local.passwords.JENKINS_PASSWORD
+  sensitive   = true
+}
+
+output "sonarqube_admin_password" {
+  description = "Auto-generated admin password for SonarQube"
+  value       = random_password.sonarqube_admin.result
+  sensitive   = true
 }
 
 output "ROOT_DOMAIN" {
