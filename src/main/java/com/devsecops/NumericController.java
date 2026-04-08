@@ -13,33 +13,28 @@ public class NumericController {
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
     private static final String baseURL = "http://node-service:5000/plusone";
-    // private static final String baseURL = "http://localhost:5000/plusone";
 
     private RestTemplate restTemplate = new RestTemplate();
 
-    // Landing Page
+    // Landing Page Redirect
     @GetMapping("/")
-    public String welcome() {
-        return "index";
+    public String home() {
+        return "redirect:/index.html";
     }
 
-    // Compare number endpoint
+    // Compare endpoint
     @ResponseBody
     @GetMapping("/compare/{value}")
     public String compareToFifty(@PathVariable int value) {
 
-        String message;
-
         if (value > 50) {
-            message = "Greater than 50";
-        } else {
-            message = "Smaller than or equal to 50";
+            return "Greater than 50";
         }
 
-        return message;
+        return "Smaller than or equal to 50";
     }
 
-    // Call node microservice
+    // Call NodeJS microservice
     @ResponseBody
     @GetMapping("/increment/{value}")
     public int increment(@PathVariable int value) {
@@ -49,7 +44,7 @@ public class NumericController {
 
         String response = responseEntity.getBody();
 
-        logger.info("Value Received in Request - {}", value);
+        logger.info("Value Received - {}", value);
         logger.info("Node Service Response - {}", response);
 
         return Integer.parseInt(response);
