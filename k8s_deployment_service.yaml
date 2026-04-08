@@ -22,6 +22,7 @@ spec:
       containers:
       - image: hossamibraheem/devsecops:latest
         name: devsecops-container
+        imagePullPolicy: Always
         volumeMounts:
         - mountPath: /tmp
           name: vol

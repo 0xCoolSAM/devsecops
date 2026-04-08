@@ -45,8 +45,11 @@ resource "random_password" "sonarqube_monitoring" {
 }
 
 resource "random_password" "sonarqube_admin" {
-  length           = 24
-  special          = true
+  length  = 24
+  special = true
+  numeric = true
+  upper   = true
+  lower   = true
   override_special = "!@#$%"
 }
 

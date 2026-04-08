@@ -1515,9 +1515,11 @@ spec:
       # --plaintext
 
       echo "Triggering ArgoCD sync for $APP_NAME..."
+    
       argocd app sync "$APP_NAME" --force --prune || true
 
       echo "✅ Sync triggered"
+    # kubectl rollout restart deployment devsecops -n dev
 
   - name: wait-for-health
     image: quay.io/argoproj/argocd:v2.14.11
