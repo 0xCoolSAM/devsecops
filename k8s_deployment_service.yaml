@@ -20,7 +20,7 @@ spec:
         emptyDir: {}
       serviceAccountName: default
       containers:
-      - image: hossamibraheem/devsecops:7e2fb94
+      - image: hossamibraheem/devsecops:latest
         name: devsecops-container
         imagePullPolicy: Always
         volumeMounts:
@@ -36,7 +36,7 @@ kind: Service
 metadata:
   labels:
     app: devsecops
-  name: devsecops-svc
+  name: devsecops
 spec:
   ports:
   - port: 8080
@@ -44,4 +44,4 @@ spec:
     targetPort: 8080
   selector:
     app: devsecops
-  type: NodePort
+  type: ClusterIP

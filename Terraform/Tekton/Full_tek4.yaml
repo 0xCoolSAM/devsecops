@@ -75,6 +75,9 @@ spec:
     default: main
   workspaces:
   - name: output
+  results:
+  - name: commit-short-sha
+    description: "The short commit SHA"
   steps:
   - name: clone
     image: alpine/git:2.45.2
@@ -84,7 +87,10 @@ spec:
       rm -rf repo
       git clone --depth 1 --branch "$(params.revision)" "$(params.repo-url)" repo
       cp -R repo/. $(workspaces.output.path)/
-      rm -rf repo
+      cd $(workspaces.output.path)
+      SHORT_SHA=$(git rev-parse --short=7 HEAD)
+      echo -n "$SHORT_SHA" > $(results.commit-short-sha.path)
+      rm -rf $(workspaces.output.path)/repo
 
 #################################################
 # TASK: MAVEN COMPILE
@@ -975,25 +981,19 @@ spec:
 
   steps:
   - name: resolve
-    image: bitnami/kubectl:latest
+    image: alpine:3.20
+    env:
+    - name: APP_URL
+      valueFrom:
+        configMapKeyRef:
+          name: devsecops-urls
+          key: APP_URL
     script: |
       #!/bin/sh
       set -eu
 
-      SERVICE_NAME="devsecops-svc"
-      NAMESPACE="dev"
-      PUBLIC_DNS="devsecops.switzerlandnorth.cloudapp.azure.com"
-
-      echo "Fetching NodePort from service..."
-
-      NODE_PORT=$(kubectl get svc $SERVICE_NAME -n $NAMESPACE \
-        -o jsonpath='{.spec.ports[0].nodePort}')
-
-      echo "NodePort detected: $NODE_PORT"
-
-      APP_URL="http://$PUBLIC_DNS:$NODE_PORT"
-
-      echo "Resolved URL: $APP_URL"
+      echo "Application URL:"
+      echo "$APP_URL"
 
       echo -n "$APP_URL" > $(results.app-url.path)
 
@@ -1881,7 +1881,7 @@ spec:
     - name: dockerhub-repository
       value: $(params.dockerhub-repository)
     - name: image-tag
-      value: $(params.image-tag)
+      value: $(tasks.clone.results.commit-short-sha)
     workspaces:
     - name: source
       workspace: source-workspace
@@ -1897,7 +1897,7 @@ spec:
     - name: dockerhub-repository
       value: $(params.dockerhub-repository)
     - name: image-tag
-      value: $(params.image-tag)
+      value: $(tasks.clone.results.commit-short-sha)
     workspaces:
     - name: security-reports
       workspace: security-reports
@@ -1911,7 +1911,7 @@ spec:
     - name: dockerhub-repository
       value: $(params.dockerhub-repository)
     - name: image-tag
-      value: $(params.image-tag)
+      value: $(tasks.clone.results.commit-short-sha)
     workspaces:
     - name: source
       workspace: source-workspace
@@ -1960,7 +1960,7 @@ spec:
     - name: dockerhub-repository
       value: $(params.dockerhub-repository)
     - name: image-tag
-      value: $(params.image-tag)
+      value: $(tasks.clone.results.commit-short-sha)
     workspaces:
     - name: security-reports
       workspace: security-reports
@@ -1985,7 +1985,7 @@ spec:
     - name: dockerhub-repository
       value: $(params.dockerhub-repository)
     - name: image-tag
-      value: $(params.image-tag)
+      value: $(tasks.clone.results.commit-short-sha)
     workspaces:
     - name: gitops-workspace
       workspace: gitops-workspace
@@ -2079,7 +2079,7 @@ spec:
       name: slack-notify
     params:
     - name: message
-      value: "DevSecOps pipeline *succeeded* for $(params.repo-url) @ $(params.revision)\nImage: $(params.dockerhub-repository):$(params.image-tag)\nGitOps: $(params.gitops-repo-url)\nArgoCD App: $(params.argocd-app-name)"
+      value: "DevSecOps pipeline *succeeded* for $(params.repo-url) @ $(params.revision)\nImage: $(params.dockerhub-repository):$(tasks.clone.results.commit-short-sha)\nGitOps: $(params.gitops-repo-url)\nArgoCD App: $(params.argocd-app-name)"
     - name: status
       value: "success"
 
@@ -2092,7 +2092,7 @@ spec:
       name: slack-notify
     params:
     - name: message
-      value: "DevSecOps pipeline *FAILED* for $(params.repo-url) @ $(params.revision)\nImage: $(params.dockerhub-repository):$(params.image-tag)"
+      value: "DevSecOps pipeline *FAILED* for $(params.repo-url) @ $(params.revision)\nImage: $(params.dockerhub-repository):$(tasks.clone.results.commit-short-sha)"
     - name: status
       value: "failure"
 

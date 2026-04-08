@@ -111,6 +111,12 @@ DEFECTDOJO_URL="defectdojo-${NIP_IP}.nip.io"
 DEFECTDOJO_TLS="defectdojo-tls"
 DEFECTDOJO_NS="defectdojo"
 
+#APP
+APP_DOMAIN="devsecops-${NIP_IP}.nip.io"
+APP_URL="devsecops-${NIP_IP}.nip.io"
+APP_TLS="app-tls"
+APP_NS="dev"
+
 echo "Public IP: $PUBLIC_IP"
 ########################################
 # SYSTEM PREP
@@ -290,6 +296,7 @@ kubectl create configmap devsecops-urls \
   --from-literal=ARGOCD_URL=https://$ARGOCD_URL \
   --from-literal=ARGOCD_SERVER=$ARGOCD_URL \
   --from-literal=TEKTON_URL=https://$TEKTON_URL \
+  --from-literal=APP_URL=https://$APP_URL \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # ########################################
@@ -526,6 +533,10 @@ cat <<EOF > /tmp/index.html
 
     <div class="card">
         <a href="https://${DEFECTDOJO_DOMAIN}" target="_blank">DefectDojo</a>
+    </div>
+
+    <div class="card">
+        <a href="https://${APP_DOMAIN}" target="_blank">App</a>
     </div>
 
 </body>
@@ -1400,5 +1411,47 @@ if [ -f "$COSIGN_DIR/cosign.key" ]; then
 else
   warn "Cosign key generation failed — image signing will be unavailable"
 fi
+
+########################################
+# Application Ingress
+########################################
+log "Deploying Application Ingress"
+
+kubectl create namespace "$APP_NS" 2>/dev/null || true
+
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devsecops-ingress
+  namespace: $APP_NS
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-http
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - ${APP_DOMAIN}
+    secretName: ${APP_TLS}
+  rules:
+  - host: ${APP_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: devsecops
+            port:
+              number: 8080
+EOF
+
+check_cert "$APP_NS" "$APP_TLS"
+
+echo ""
+echo "DevSecOps Application URL:"
+echo "https://${APP_URL}"
+echo ""
 
 echo "✅ Bootstrap completed successfully"
