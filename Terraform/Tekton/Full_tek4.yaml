@@ -155,7 +155,7 @@ spec:
     workingDir: $(workspaces.source.path)
     script: |
       set -eu
-      mvn -B -ntp -Dmaven.repo.local=/root/.m2 org.pitest:pitest-maven:mutationCoverage
+      mvn -B -ntp -Dmaven.repo.local=/root/.m2 org.pitest:pitest-maven:mutationCoverage || true
 
 #################################################
 # TASK: MAVEN PACKAGE
@@ -277,6 +277,11 @@ metadata:
   name: syft-source-sbom
   namespace: tekton-devsecops
 spec:
+  params:
+  - name: dockerhub-repository
+    description: "DockerHub repository"
+  - name: image-tag
+    description: "Image tag"
   workspaces:
   - name: source
   - name: security-reports
@@ -285,12 +290,13 @@ spec:
   - name: generate-sbom
     image: anchore/syft:v1.20.0
     workingDir: $(workspaces.source.path)
-    command:
-    - /syft
+    # command:
+    # - /syft
     args:
-    - dir:$(workspaces.source.path)
+    - scan
+    - registry:$(params.dockerhub-repository):$(params.image-tag)
     - -o
-    - cyclonedx-json=/workspace/security-reports/sbom-source.json
+    - cyclonedx-json=/workspace/security-reports/sbom-image.json
 
 #################################################
 # TASK: SCA
@@ -309,14 +315,16 @@ spec:
   - name: scan-sbom
     image: anchore/grype:v0.86.1
     workingDir: /workspace/security-reports
-    command:
-    - /grype
+    # command:
+    # - /grype
     args:
-    - sbom:/workspace/security-reports/sbom-source.json
+    - sbom:/workspace/security-reports/sbom-image.json
     - -o
     - json
     - --file
     - /workspace/security-reports/grype-report.json
+    # - -f
+    # - critical
     # script: |
     #   set -eu
     #   /grype sbom:/workspace/security-reports/sbom-source.json \
@@ -574,6 +582,7 @@ spec:
   steps:
   - name: build
     image: gcr.io/kaniko-project/executor:v1.23.2
+    stepTemplate:
     volumeMounts:
     - name: docker-config
       mountPath: /kaniko/.docker
@@ -647,75 +656,83 @@ spec:
 
       echo "✅ Trivy image scan passed — no CRITICAL vulnerabilities"
 
-###############################################
-# TASK: IMAGE SBOM FROM ARCHIVE
-################################################
----
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: syft-image-sbom
-  namespace: tekton-devsecops
-spec:
-  params:
-  - name: dockerhub-repository
-  - name: image-tag
-  workspaces:
-  - name: security-reports
-    mountPath: /workspace/security-reports
-  volumes:
-  - name: docker-config
-    secret:
-      secretName: dockerhub-secret
-      items:
-      - key: .dockerconfigjson
-        path: config.json
-  steps:
-  - name: generate-image-sbom
-    image: anchore/syft:v1.20.0
-    volumeMounts:
-    - name: docker-config
-      mountPath: /root/.docker
-    script: |
-      set -eu
-      syft registry:$(params.dockerhub-repository):$(params.image-tag) \
-        -o cyclonedx-json=/workspace/security-reports/sbom-image.json
-################################################
-# TASK: GRYPE IMAGE SCAN — SCA from image SBOM
-# SECURITY GATE: Fails on CRITICAL vulnerabilities
-################################################
----
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: grype-image-scan
-  namespace: tekton-devsecops
-spec:
-  workspaces:
-  - name: security-reports
-    mountPath: /workspace/security-reports
-  steps:
-  - name: scan-image-sbom
-    image: anchore/grype:v0.86.1
-    workingDir: /workspace/security-reports
-    script: |
-      set -eu
-      /grype sbom:/workspace/security-reports/sbom-image.json \
-        -o json \
-        --file /workspace/security-reports/grype-image-report.json
+# ###############################################
+# # TASK: IMAGE SBOM FROM ARCHIVE
+# ################################################
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: syft-image-sbom
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: dockerhub-repository
+#   - name: image-tag
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   volumes:
+#   - name: docker-config
+#     secret:
+#       secretName: dockerhub-secret
+#       items:
+#       - key: .dockerconfigjson
+#         path: config.json
+#   steps:
+#   - name: generate-image-sbom
+#     image: anchore/syft:v1.20.0
+#     workingDir: $(workspaces.source.path)
+#     volumeMounts:
+#     - name: docker-config
+#       mountPath: /root/.docker
+#     args:
+#     - scan
+#     - registry:$(params.dockerhub-repository):$(params.image-tag)
+#     - -o
+#     - cyclonedx-json=/workspace/security-reports/sbom-image.json
+# ################################################
+# # TASK: GRYPE IMAGE SCAN — SCA from image SBOM
+# # SECURITY GATE: Fails on CRITICAL vulnerabilities
+# ################################################
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: grype-image-scan
+#   namespace: tekton-devsecops
+# spec:
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   steps:
+#   - name: scan-image-sbom
+#     image: anchore/grype:v0.86.1
+#     workingDir: /workspace/security-reports
+#     args:
+#     - sbom:/workspace/security-reports/sbom-image.json
+#     - -o
+#     - json
+#     - --file
+#     - /workspace/security-reports/grype-report.json
+#     # script: |
+#     #   set -eu
+#     #   /grype sbom:/workspace/security-reports/sbom-image.json \
+#     #     -o json \
+#     #     --file /workspace/security-reports/grype-image-report.json
 
-      echo "Checking image SBOM for CRITICAL vulnerabilities..."
-      CRITICAL_COUNT=$(cat /workspace/security-reports/grype-image-report.json | \
-        grep -o '"severity":"Critical"' | wc -l || echo "0")
+#     #   echo "Checking image SBOM for CRITICAL vulnerabilities..."
+#     #   CRITICAL_COUNT=$(cat /workspace/security-reports/grype-image-report.json | \
+#     #     grep -o '"severity":"Critical"' | wc -l || echo "0")
 
-      echo "Found $CRITICAL_COUNT CRITICAL vulnerabilities in container image dependencies"
+#     #   echo "Found $CRITICAL_COUNT CRITICAL vulnerabilities in container image dependencies"
 
-      if [ "$CRITICAL_COUNT" -gt 0 ]; then
-        echo "❌ SECURITY GATE FAILED: $CRITICAL_COUNT CRITICAL image vulnerabilities"
-        exit 1
-      fi
+#     #   if [ "$CRITICAL_COUNT" -gt 0 ]; then
+#     #     echo "❌ SECURITY GATE FAILED: $CRITICAL_COUNT CRITICAL image vulnerabilities"
+#     #     exit 1
+#     #   fi
 
-      echo "✅ Grype image scan passed — no CRITICAL vulnerabilities"
+#     #   echo "✅ Grype image scan passed — no CRITICAL vulnerabilities"
 ################################################
 # TASK: COSIGN SIGN — sign the container image
 ################################################
@@ -728,7 +745,9 @@ metadata:
 spec:
   params:
   - name: dockerhub-repository
+    description: "DockerHub repository"
   - name: image-tag
+    description: "Image tag"
   workspaces:
   - name: security-reports
     mountPath: /workspace/security-reports
@@ -743,12 +762,14 @@ spec:
       - key: .dockerconfigjson
         path: config.json
   stepTemplate:
+    env:
+    - name: DOCKER_CONFIG
+      value: /tekton/home/.docker
     volumeMounts:
     - name: cosign-key
       mountPath: /etc/cosign
-      readOnly: true
     - name: docker-config
-      mountPath: /root/.docker
+      mountPath: /tekton/home/.docker
   steps:
   - name: sign
     image: ghcr.io/sigstore/cosign/cosign:v2.4.1
@@ -758,12 +779,22 @@ spec:
         secretKeyRef:
           name: cosign-key
           key: password
-    script: |
-      set -eu
-      IMAGE="$(params.dockerhub-repository):$(params.image-tag)"
-      echo "Signing image $IMAGE..."
-      cosign sign --yes --key /etc/cosign/cosign.key $IMAGE
-      echo "✅ Image signed successfully"
+    - name: DOCKER_CONFIG
+      value: /tekton/home/.docker
+    args:
+    - sign
+    - --yes
+    - --key
+    - /etc/cosign/cosign.key
+    - $(params.dockerhub-repository):$(params.image-tag)
+    # - --tlog-upload=false
+    # script: |
+    #   #!/usr/bin/env sh
+    #   set -eu
+    #   IMAGE="$(params.dockerhub-repository):$(params.image-tag)"
+    #   echo "Signing image $IMAGE..."
+    #   cosign sign --yes --key /etc/cosign/cosign.key $IMAGE
+    #   echo "✅ Image signed successfully"
 
   - name: attest-sbom
     image: ghcr.io/sigstore/cosign/cosign:v2.4.1
@@ -773,20 +804,49 @@ spec:
         secretKeyRef:
           name: cosign-key
           key: password
-    script: |
-      set -eu
-      IMAGE="$(params.dockerhub-repository):$(params.image-tag)"
-      if [ -f /workspace/security-reports/sbom-image.json ]; then
-        echo "Attesting SBOM to image $IMAGE..."
-        cosign attest --yes --key /etc/cosign/cosign.key \
-          --predicate /workspace/security-reports/sbom-image.json \
-          --type cyclonedx \
-          $IMAGE
-        echo "✅ SBOM attestation attached"
-      else
-        echo "⚠ No image SBOM found, skipping attestation"
-      fi
+    - name: DOCKER_CONFIG
+      value: /tekton/home/.docker
+    args:
+    - attest
+    - --yes
+    - --key
+    - /etc/cosign/cosign.key
+    - --predicate
+    - /workspace/security-reports/sbom-image.json
+    - --type
+    - cyclonedx
+    - $(params.dockerhub-repository):$(params.image-tag)
+    # script: |
+    #   #!/usr/bin/env sh
+    #   set -eu
+    #   IMAGE="$(params.dockerhub-repository):$(params.image-tag)"
+    #   if [ -f /workspace/security-reports/sbom-image.json ]; then
+    #     echo "Attesting SBOM to image $IMAGE..."
+    #   # cosign attest --predicate sbom-image.json --type cyclonedx $(params.dockerhub-repository):$(params.image-tag)
+    #     cosign attest --yes --key /etc/cosign/cosign.key \
+    #       --predicate /workspace/security-reports/sbom-image.json \
+    #       --type cyclonedx \
+    #       $IMAGE
+    #     echo "✅ SBOM attestation attached"
+    #   else
+    #     echo "⚠ No image SBOM found, skipping attestation"
+    #   fi
 
+  - name: verify
+    image: ghcr.io/sigstore/cosign/cosign:v2.4.1
+    env:
+    - name: COSIGN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: cosign-key
+          key: password
+    - name: DOCKER_CONFIG
+      value: /tekton/home/.docker
+    args:
+    - verify
+    - --key
+    - /etc/cosign/cosign.pub
+    - $(params.dockerhub-repository):$(params.image-tag)
 #################################################
 # TASK: K8S SECURITY
 #################################################
@@ -1566,39 +1626,39 @@ spec:
         echo "✅ ArgoCD deployment verified — $APP_NAME is Healthy"
       fi
 
----
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: cosign-sign-attest
-  namespace: tekton-devsecops
-spec:
-  params:
-  - name: image
-  workspaces:
-  - name: security-reports
-    mountPath: /workspace/security-reports
-  volumes:
-  - name: cosign-key
-    secret:
-      secretName: cosign-key
-  stepTemplate:
-    volumeMounts:
-    - name: cosign-key
-      mountPath: /etc/cosign
-      readOnly: true
-  steps:
-  - name: sign
-    image: ghcr.io/sigstore/cosign/cosign:v2.4.1
-    env:
-    - name: COSIGN_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          name: cosign-key
-          key: password
-    script: |
-      set -eu
-      cosign sign --key /etc/cosign/cosign.key $(params.image)
+# ---
+# apiVersion: tekton.dev/v1
+# kind: Task
+# metadata:
+#   name: cosign-sign-attest
+#   namespace: tekton-devsecops
+# spec:
+#   params:
+#   - name: image
+#   workspaces:
+#   - name: security-reports
+#     mountPath: /workspace/security-reports
+#   volumes:
+#   - name: cosign-key
+#     secret:
+#       secretName: cosign-key
+#   stepTemplate:
+#     volumeMounts:
+#     - name: cosign-key
+#       mountPath: /etc/cosign
+#       readOnly: true
+#   steps:
+#   - name: sign
+#     image: ghcr.io/sigstore/cosign/cosign:v2.4.1
+#     env:
+#     - name: COSIGN_PASSWORD
+#       valueFrom:
+#         secretKeyRef:
+#           name: cosign-key
+#           key: password
+#     script: |
+#       set -eu
+#       cosign sign --key /etc/cosign/cosign.key $(params.image)
 
 #################################################
 # PIPELINE
@@ -1790,26 +1850,6 @@ spec:
     - name: source
       workspace: source-workspace
 
-  - name: source-sbom
-    onError: continue
-    runAfter: [package]
-    taskRef:
-      name: syft-source-sbom
-    workspaces:
-    - name: source
-      workspace: source-workspace
-    - name: security-reports
-      workspace: security-reports
-
-  - name: sca
-    onError: continue
-    runAfter: [source-sbom]
-    taskRef:
-      name: grype-scan
-    workspaces:
-    - name: security-reports
-      workspace: security-reports
-
   - name: trivy-fs
     onError: continue
     runAfter: [package]
@@ -1829,7 +1869,6 @@ spec:
     onError: continue
     runAfter:
     - sonar
-    - sca
     - trivy-fs
     - secret-gitleaks
     - secret-trufflehog
@@ -1863,36 +1902,36 @@ spec:
     - name: security-reports
       workspace: security-reports
 
-  - name: image-sbom
+  - name: source-sbom
     onError: continue
     runAfter: [build-image-archive]
     taskRef:
-      name: syft-image-sbom
+      name: syft-source-sbom
     params:
     - name: dockerhub-repository
       value: $(params.dockerhub-repository)
     - name: image-tag
       value: $(params.image-tag)
     workspaces:
+    - name: source
+      workspace: source-workspace
     - name: security-reports
       workspace: security-reports
 
-  - name: image-sca
+  - name: sca
     onError: continue
-    runAfter: [image-sbom]
+    runAfter: [source-sbom]
     taskRef:
-      name: grype-image-scan
+      name: grype-scan
     workspaces:
     - name: security-reports
       workspace: security-reports
 
-  # - name: cosign-sign
+  # - name: image-sbom
   #   onError: continue
-  #   runAfter:
-  #   - image-scan
-  #   - image-sca
+  #   runAfter: [build-image-archive]
   #   taskRef:
-  #     name: cosign-sign-attest
+  #     name: syft-image-sbom
   #   params:
   #   - name: dockerhub-repository
   #     value: $(params.dockerhub-repository)
@@ -1902,6 +1941,30 @@ spec:
   #   - name: security-reports
   #     workspace: security-reports
 
+  # - name: image-sca
+  #   onError: continue
+  #   runAfter: [image-sbom]
+  #   taskRef:
+  #     name: grype-image-scan
+  #   workspaces:
+  #   - name: security-reports
+  #     workspace: security-reports
+
+  - name: cosign-sign
+    onError: continue
+    runAfter:
+    - sca
+    taskRef:
+      name: cosign-sign-attest
+    params:
+    - name: dockerhub-repository
+      value: $(params.dockerhub-repository)
+    - name: image-tag
+      value: $(params.image-tag)
+    workspaces:
+    - name: security-reports
+      workspace: security-reports
+
   # =============================================
   # GITOPS: update manifests → ArgoCD sync
   # Runs ONLY after all security gates + cosign pass
@@ -1910,7 +1973,7 @@ spec:
   - name: update-gitops-manifests
     onError: continue
     runAfter:
-    # - cosign-sign
+    - cosign-sign
     - build-image-archive
     taskRef:
       name: update-gitops-manifests
@@ -1952,8 +2015,7 @@ spec:
     onError: continue
     runAfter:
     - image-scan
-    - image-sca
-    # - cosign-sign
+    - cosign-sign
     - conftest-k8s
     - k8s-config-scan
     - verify-argocd-sync

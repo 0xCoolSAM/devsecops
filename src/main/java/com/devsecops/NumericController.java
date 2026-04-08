@@ -22,7 +22,8 @@ public class NumericController {
 
 		@GetMapping("/")
 		public String welcome() {
-			return "⚡ Secure DevSecOps Pipeline by Hossam Ibraheem";
+			// return "⚡ Secure DevSecOps Pipeline by Hossam Ibraheem";
+			return "index";
 		}
 
 		@GetMapping("/compare/{value}")
