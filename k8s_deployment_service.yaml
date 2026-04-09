@@ -20,7 +20,7 @@ spec:
         emptyDir: {}
       serviceAccountName: default
       containers:
-      - image: hossamibraheem/devsecops:7ddcb7c
+      - image: hossamibraheem/devsecops:fa4d77e
         name: devsecops-container
         imagePullPolicy: Always
         volumeMounts:
