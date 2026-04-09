@@ -10,7 +10,7 @@ set -euo pipefail
 ########################################
 # CONFIG
 ########################################
-EMAIL="" #Put Your Personal Mail
+EMAIL="hossamibraheem2014@gmail.com" #Put Your Personal Mail
 K8S_VERSION="v1.35"
 POD_CIDR="10.244.0.0/16"
 MAX_RETRIES=5
