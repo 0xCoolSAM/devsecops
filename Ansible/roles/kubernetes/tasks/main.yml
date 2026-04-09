@@ -1,0 +1,142 @@
+---
+# Ansible/roles/kubernetes/tasks/main.yml
+
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Download Kubernetes Apt key
+  ansible.builtin.shell: curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add Kubernetes apt repository
+  ansible.builtin.apt_repository:
+    repo: deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /
+    state: present
+    filename: kubernetes
+
+- name: Install Kubernetes components
+  ansible.builtin.apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    update_cache: true
+
+- name: Hold Kubernetes packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Check if cluster is already initialized
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+
+- name: Initialize Kubernetes cluster
+  ansible.builtin.command: kubeadm init --pod-network-cidr=10.244.0.0/16 --skip-token-print
+  when: not k8s_admin_conf.stat.exists
+
+- name: Create .kube directory for user
+  ansible.builtin.file:
+    path: /home/{{ ansible_user }}/.kube
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Copy admin.conf to user's kube config
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/{{ ansible_user }}/.kube/config
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+
+- name: Add kubectl alias to bashrc
+  ansible.builtin.lineinfile:
+    path: /home/{{ ansible_user }}/.bashrc
+    line: alias k=kubectl
+    create: true
+
+- name: Add kubectl completion to bashrc
+  ansible.builtin.lineinfile:
+    path: /home/{{ ansible_user }}/.bashrc
+    line: source <(kubectl completion bash)
+    create: true
+
+- name: Install Flannel CNI
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+
+- name: Wait for nodes to be ready
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=Ready nodes --all --timeout=300s
+  changed_when: false
+
+- name: Remove master taint
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config taint nodes --all node-role.kubernetes.io/control-plane-
+  register: taint_result
+  failed_when: taint_result.rc != 0 and 'not found' not in taint_result.stderr
+  changed_when: "'untainted' in taint_result.stdout"
+
+- name: Install local-path-provisioner
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+
+- name: Set local-path as default storage class
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: local-path
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+
+- name: Get node InternalIP
+  ansible.builtin.shell: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'
+  register: node_ip
+  changed_when: false
+
+- name: Add NFS subdir external provisioner repo
+  kubernetes.core.helm_repository:
+    name: nfs-subdir-external-provisioner
+    repo_url: https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+
+- name: Install NFS subdir external provisioner
+  kubernetes.core.helm:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    name: nfs-rwx
+    chart_ref: nfs-subdir-external-provisioner/nfs-subdir-external-provisioner
+    release_namespace: default
+    values:
+      nfs:
+        server: "{{ node_ip.stdout }}"
+        path: /srv/nfs
+
+- name: Set nfs-client as default storage class (replacing local-path)
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: nfs-client
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"

@@ -1,0 +1,353 @@
+---
+# Ansible/roles/devsecops-tools/tasks/main.yml
+
+- name: Add DefectDojo helm repo
+  kubernetes.core.helm_repository:
+    name: defectdojo
+    repo_url: https://raw.githubusercontent.com/DefectDojo/django-DefectDojo/helm-charts
+
+- name: Deploy DefectDojo
+  kubernetes.core.helm:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    name: defectdojo
+    chart_ref: defectdojo/defectdojo
+    release_namespace: defectdojo
+    create_namespace: true
+    values:
+      createSecret: true
+      createValkeySecret: true
+      createPostgresqlSecret: true
+      admin:
+        user: admin
+        password: "{{ defectdojo_pass }}"
+        mail: admin@local
+      certmanager:
+        enabled: true
+      django:
+        ingress:
+          enabled: true
+          ingressClassName: nginx
+          annotations:
+            cert-manager.io/cluster-issuer: letsencrypt-http
+            nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+            nginx.ingress.kubernetes.io/proxy-body-size: 50m
+          hosts:
+            - host: defectdojo-{{ nip_ip }}.nip.io
+          tls:
+            - hosts:
+                - defectdojo-{{ nip_ip }}.nip.io
+              secretName: defectdojo-tls
+        mediaPersistentVolume:
+          enabled: true
+          persistentVolumeClaim:
+            create: true
+        uwsgi:
+          resources:
+            requests:
+              memory: 2Gi
+            limits:
+              memory: 3Gi
+          extraEnv:
+            - name: DD_SECURE_PROXY_SSL_HEADER
+              value: HTTP_X_FORWARDED_PROTO,https
+      host: defectdojo-{{ nip_ip }}.nip.io
+      monitoring:
+        enabled: true
+        prometheus:
+          enabled: true
+      alternativeHosts:
+        - defectdojo-{{ nip_ip }}.nip.io
+      siteUrl: https://defectdojo-{{ nip_ip }}.nip.io
+      postgresql:
+        primary:
+          persistence:
+            storageClass: local-path
+      valkey:
+        primary:
+          persistence:
+            storageClass: local-path
+
+- name: Check DefectDojo TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: defectdojo
+    name: defectdojo-tls
+  register: dd_cert
+  until: >
+    dd_cert.resources | length > 0 and  (dd_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first | default('False'))
+    == 'True'
+  retries: 24
+  delay: 5
+
+- name: Add ArgoCD helm repo
+  kubernetes.core.helm_repository:
+    name: argo
+    repo_url: https://argoproj.github.io/argo-helm
+
+- name: Deploy ArgoCD
+  kubernetes.core.helm:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    name: argocd
+    chart_ref: argo/argo-cd
+    release_namespace: argocd
+    create_namespace: true
+    values:
+      server:
+        service:
+          type: ClusterIP
+        extraArgs:
+          - --insecure
+
+- name: Wait for ArgoCD server to be available
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
+  changed_when: false
+
+- name: Create ArgoCD Ingress
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: argocd
+        namespace: argocd
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-http
+          nginx.ingress.kubernetes.io/backend-protocol: HTTP
+          nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+          nginx.ingress.kubernetes.io/hsts: "true"
+          nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+          nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+          nginx.ingress.kubernetes.io/hsts-preload: "true"
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - argocd-{{ nip_ip }}.nip.io
+            secretName: argocd-tls
+        rules:
+          - host: argocd-{{ nip_ip }}.nip.io
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: argocd-server
+                      port:
+                        number: 80
+
+- name: Check ArgoCD TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: argocd
+    name: argocd-tls
+  register: argocd_cert
+  until: >
+    argocd_cert.resources | length > 0 and  (argocd_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first
+    | default('False')) == 'True'
+  retries: 24
+  delay: 5
+
+- name: Add SonarQube helm repo
+  kubernetes.core.helm_repository:
+    name: sonarqube
+    repo_url: https://SonarSource.github.io/helm-chart-sonarqube
+
+- name: Create SonarQube namespace
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: sonarqube
+
+- name: Create SonarQube monitoring passcode secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: sonarqube-monitoring-passcode
+        namespace: sonarqube
+      stringData:
+        monitoring-passcode: "{{ sonarqube_mon_pass }}"
+
+- name: Deploy SonarQube
+  kubernetes.core.helm:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    name: sonarqube
+    chart_ref: sonarqube/sonarqube
+    release_namespace: sonarqube
+    values:
+      community:
+        enabled: true
+      monitoringPasscodeSecretName: sonarqube-monitoring-passcode
+      monitoringPasscodeSecretKey: monitoring-passcode
+      ingress:
+        enabled: true
+        ingressClassName: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-http
+        hosts:
+          - name: sonarqube-{{ nip_ip }}.nip.io
+        tls:
+          - hosts:
+              - sonarqube-{{ nip_ip }}.nip.io
+            secretName: sonarqube-tls
+
+- name: Check SonarQube TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: sonarqube
+    name: sonarqube-tls
+  register: sonar_cert
+  until: >
+    sonar_cert.resources | length > 0 and  (sonar_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first |
+    default('False')) == 'True'
+  retries: 24
+  delay: 5
+
+- name: Create Tekton namespace
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: tekton-pipelines
+
+- name: Install Tekton Pipelines
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
+
+- name: Wait for Tekton Pipeline CRDs
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=Established crd/pipelineruns.tekton.dev --timeout=180s
+  changed_when: false
+
+- name: Wait for Tekton webhook
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=available deployment tekton-pipelines-webhook -n tekton-pipelines
+    --timeout=300s
+  changed_when: false
+
+- name: Install Tekton Dashboard
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: https://storage.googleapis.com/tekton-releases/dashboard/latest/release-full.yaml
+
+- name: Install Tekton Triggers and Interceptors
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: "{{ item }}"
+  loop:
+    - https://storage.googleapis.com/tekton-releases/triggers/latest/release.yaml
+    - https://storage.googleapis.com/tekton-releases/triggers/latest/interceptors.yaml
+
+- name: Apply Tekton Dashboard RBAC fixes
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: "{{ item.apiVersion }}"
+      kind: "{{ item.kind }}"
+      metadata:
+        name: tekton-dashboard-discovery
+      rules: "{{ item.rules | default(omit) }}"
+      subjects: "{{ item.subjects | default(omit) }}"
+      roleRef: "{{ item.roleRef | default(omit) }}"
+  loop:
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      rules:
+        - nonResourceURLs: [/api, /api/*, /apis, /apis/*]
+          verbs: [get]
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      subjects:
+        - kind: ServiceAccount
+          name: tekton-dashboard
+          namespace: tekton-pipelines
+      roleRef:
+        kind: ClusterRole
+        name: tekton-dashboard-discovery
+        apiGroup: rbac.authorization.k8s.io
+
+- name: Restart Tekton dashboard
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config rollout restart deployment tekton-dashboard -n tekton-pipelines
+
+- name: Create Tekton Ingress
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: tekton-dashboard
+        namespace: tekton-pipelines
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-http
+          nginx.ingress.kubernetes.io/backend-protocol: HTTP
+          nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+          nginx.ingress.kubernetes.io/hsts: "true"
+          nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - tekton-{{ nip_ip }}.nip.io
+            secretName: tekton-tls
+        rules:
+          - host: tekton-{{ nip_ip }}.nip.io
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: tekton-dashboard
+                      port:
+                        number: 9097
+
+- name: Disable Tekton Affinity Assistant
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config patch configmap feature-flags -n tekton-pipelines --type merge -p '{"data":{"coschedule":"disabled"}}'
+  changed_when: true
+
+- name: Check Tekton TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: tekton-pipelines
+    name: tekton-tls
+  register: tekton_cert
+  until: >
+    tekton_cert.resources | length > 0 and  (tekton_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first
+    | default('False')) == 'True'
+  retries: 24
+  delay: 5
+
+- name: Install Tekton CLI (tkn)
+  ansible.builtin.shell: |
+    TKN_VERSION=$(curl -s https://api.github.com/repos/tektoncd/cli/releases/latest | jq -r .tag_name)
+    FILE="tkn_${TKN_VERSION#v}_Linux_x86_64.tar.gz"
+    wget https://github.com/tektoncd/cli/releases/download/${TKN_VERSION}/${FILE}
+    tar -xzf $FILE
+    mv tkn /usr/local/bin/
+    chmod +x /usr/local/bin/tkn
+    rm $FILE
+  args:
+    creates: /usr/local/bin/tkn

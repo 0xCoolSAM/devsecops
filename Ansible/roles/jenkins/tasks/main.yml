@@ -1,0 +1,141 @@
+---
+# Ansible/roles/jenkins/tasks/main.yml
+
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Clean up old Jenkins repo and keys
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/jenkins.list
+    - /etc/apt/keyrings/jenkins-keyring.asc
+
+- name: Download Jenkins asc key
+  ansible.builtin.get_url:
+    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+    dest: /etc/apt/keyrings/jenkins-keyring.asc
+    mode: "0644"
+
+- name: Add Jenkins apt repository
+  ansible.builtin.apt_repository:
+    repo: deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
+    state: present
+    filename: jenkins
+
+- name: Install Jenkins
+  ansible.builtin.apt:
+    name: jenkins
+    state: present
+    update_cache: true
+
+- name: Ensure Jenkins service is started and enabled
+  ansible.builtin.systemd:
+    name: jenkins
+    state: started
+    enabled: true
+
+- name: Create root kube directory
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: "0755"
+
+- name: Copy kube config for Jenkins/root
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    mode: "0600"
+
+- name: Create Jenkins namespace
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: jenkins
+
+- name: Create Jenkins Service
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: jenkins
+        namespace: jenkins
+      spec:
+        ports:
+          - port: 8080
+            targetPort: 8080
+
+- name: Create Jenkins Endpoints
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Endpoints
+      metadata:
+        name: jenkins
+        namespace: jenkins
+      subsets:
+        - addresses:
+            - ip: "{{ inventory_hostname }}"
+          ports:
+            - port: 8080
+
+- name: Create Jenkins Ingress
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: jenkins
+        namespace: jenkins
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-http
+          nginx.ingress.kubernetes.io/backend-protocol: HTTP
+          nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+          nginx.ingress.kubernetes.io/hsts: "true"
+          nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - jenkins-{{ nip_ip }}.nip.io
+            secretName: jenkins-tls
+        rules:
+          - host: jenkins-{{ nip_ip }}.nip.io
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: jenkins
+                      port:
+                        number: 8080
+
+- name: Check Jenkins TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: jenkins
+    name: jenkins-tls
+  register: jenkins_cert
+  until: >
+    jenkins_cert.resources | length > 0 and  (jenkins_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first
+    | default('False')) == 'True'
+  retries: 24
+  delay: 5

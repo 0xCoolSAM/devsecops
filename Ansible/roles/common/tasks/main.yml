@@ -1,0 +1,118 @@
+---
+# Ansible/roles/common/tasks/main.yml
+
+- name: Update APT cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install base and build dependencies
+  ansible.builtin.apt:
+    name:
+      - sshpass
+      - curl
+      - wget
+      - git
+      - jq
+      - ca-certificates
+      - gnupg
+      - gnupg-agent
+      - dirmngr
+      - lsb-release
+      - software-properties-common
+      - apt-transport-https
+      - bash-completion
+      - openjdk-17-jdk
+      - openjdk-21-jdk
+      - maven
+      - gradle
+      - python3
+      - python3-pip
+      - python3-venv
+      - pipx
+      - nfs-kernel-server
+    state: present
+
+- name: Add NodeSource LTS repository
+  ansible.builtin.shell: curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+  args:
+    creates: /etc/apt/sources.list.d/nodesource.list
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+
+- name: Disable swap
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Remove swap from fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: ^([^#].*?\sswap\s+sw\s+.*)$
+    replace: "# \\1"
+
+- name: Ensure kernel modules are loaded
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+
+- name: Load kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Set sysctl parameters
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_set: true
+    sysctl_file: /etc/sysctl.d/k8s.conf
+  loop:
+    - { name: net.bridge.bridge-nf-call-iptables, value: "1" }
+    - { name: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+    - { name: net.ipv4.ip_forward, value: "1" }
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+
+- name: Configure containerd
+  ansible.builtin.shell: |
+    mkdir -p /etc/containerd
+    containerd config default | sed 's/SystemdCgroup = false/SystemdCgroup = true/' > /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+  notify: Restart containerd
+
+- name: Get Helm installer
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get_helm.sh
+    mode: "0700"
+
+- name: Install Helm
+  ansible.builtin.command: /tmp/get_helm.sh
+  args:
+    creates: /usr/local/bin/helm
+
+- name: Prepare NFS Server directory
+  ansible.builtin.file:
+    path: /srv/nfs
+    state: directory
+    mode: "0777"
+
+- name: Configure NFS exports
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    line: /srv/nfs *(rw,sync,no_subtree_check,no_root_squash)
+    create: true
+  notify: Restart nfs-server

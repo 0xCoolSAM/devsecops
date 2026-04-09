@@ -1,0 +1,17 @@
+---
+# Ansible/roles/common/handlers/main.yml
+
+- name: Restart containerd
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    enabled: true
+
+- name: Restart nfs-server
+  ansible.builtin.systemd:
+    name: nfs-kernel-server
+    state: restarted
+    enabled: true
+
+- name: Reload exports
+  ansible.builtin.command: exportfs -rav

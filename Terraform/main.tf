@@ -230,6 +230,42 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
 }
 
+# resource "local_file" "ansible_inventory" {
+#   filename = "${path.module}/../Ansible/inventory/hosts.ini"
+#   content  = <<EOF
+# [devsecops_cluster]
+# ${azurerm_public_ip.pip.ip_address} ansible_user=${var.admin_username} ansible_password=${var.admin_password} ansible_become=true ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+# EOF
+# }
+
+# resource "null_resource" "run_ansible" {
+#   depends_on = [local_file.ansible_inventory, azurerm_linux_virtual_machine.vm]
+
+#   # Push Tekton files
+#   connection {
+#     type     = "ssh"
+#     host     = azurerm_public_ip.pip.ip_address
+#     user     = var.admin_username
+#     password = var.admin_password
+#     timeout  = "5m"
+#   }
+
+#   provisioner "file" {
+#     source      = "Tekton/Full_tek.yaml"
+#     destination = "/tmp/Full_tek.yaml"
+#   }
+
+#   provisioner "local-exec" {
+#     command = "ansible-playbook -i ../Ansible/inventory/hosts.ini ../Ansible/playbooks/bootstrap.yml -e defectdojo_pass='${random_password.defectdojo_admin.result}' -e sonarqube_mon_pass='${random_password.sonarqube_monitoring.result}' -e sonarqube_admin_pass='${random_password.sonarqube_admin.result}' -e slack_webhook_url='${var.slack_webhook_url}' -e git_token='${var.git_token}' -e git_username='${var.git_username}' -e dockerhub_username='${var.dockerhub_username}' -e dockerhub_password='${var.dockerhub_token}'"
+#   }
+
+#   provisioner "remote-exec" {
+#     inline = [
+#       "kubectl apply -f /tmp/Full_tek.yaml"
+#     ]
+#   }
+# }
+
 resource "null_resource" "bootstrap" {
 
   depends_on = [azurerm_linux_virtual_machine.vm]
@@ -252,23 +288,13 @@ resource "null_resource" "bootstrap" {
     destination = "/tmp/Full_tek.yaml"
   }
 
-  provisioner "file" {
-    source      = "Tekton/Full_tek4.yaml"
-    destination = "/tmp/Full_tek4.yaml"
-  }
-
-  provisioner "file" {
-    source      = "Tekton/Test_tek.yaml"
-    destination = "/tmp/Test_tek.yaml"
-  }
-
   provisioner "remote-exec" {
     inline = [
       "chmod +x /tmp/bootstrap.sh",
       "sudo DEFECTDOJO_ADMIN_PASS='${random_password.defectdojo_admin.result}' SONARQUBE_MON_PASS='${random_password.sonarqube_monitoring.result}' SONARQUBE_ADMIN_PASS='${random_password.sonarqube_admin.result}' SLACK_WEBHOOK_URL='${var.slack_webhook_url}' GIT_TOKEN='${var.git_token}' GIT_USERNAME='${var.git_username}' DOCKERHUB_USERNAME='${var.dockerhub_username}' DOCKERHUB_TOKEN='${var.dockerhub_token}' DOCKERHUB_REPOSITORY='${var.dockerhub_repository}' bash /tmp/bootstrap.sh",
       # "sudo bash /tmp/bootstrap.sh",
-      "kubectl apply -f /tmp/Full_tek4.yaml"
-      # "kubectl create -f /tmp/Full_tek4.yaml"
+      "kubectl apply -f /tmp/Full_tek.yaml"
+      # "kubectl create -f /tmp/Full_tek.yaml"
     ]
   }
 }

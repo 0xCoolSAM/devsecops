@@ -1,0 +1,102 @@
+---
+# Ansible/roles/ingress-certmanager/tasks/main.yml
+
+- name: Create ingress-nginx namespace
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: ingress-nginx
+
+- name: Add ingress-nginx helm repo
+  kubernetes.core.helm_repository:
+    name: ingress-nginx
+    repo_url: https://kubernetes.github.io/ingress-nginx
+
+- name: Deploy ingress-nginx
+  kubernetes.core.helm:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    name: ingress-nginx
+    chart_ref: ingress-nginx/ingress-nginx
+    release_namespace: ingress-nginx
+    wait: true
+    values:
+      controller:
+        hostNetwork: true
+        kind: DaemonSet
+        service:
+          enabled: false
+        admissionWebhooks:
+          enabled: false
+
+- name: Install cert-manager
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+
+- name: Wait for cert-manager components to be ready
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=available deployment/{{ item }} -n cert-manager --timeout=300s
+  changed_when: false
+  loop:
+    - cert-manager
+    - cert-manager-webhook
+    - cert-manager-cainjector
+
+- name: Wait for cert-manager pods to be ready
+  ansible.builtin.shell: |
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=Ready pod -l app.kubernetes.io/instance=cert-manager -n cert-manager --timeout=300s
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config wait --for=condition=Ready pod -l app.kubernetes.io/component=webhook -n cert-manager --timeout=300s
+  changed_when: false
+
+- name: Delay to allow cert-manager webhook to stabilize
+  ansible.builtin.pause:
+    seconds: 10
+
+- name: Create let's encrypt ClusterIssuer
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: letsencrypt-http
+      spec:
+        acme:
+          email: hossamibraheem2014@gmail.com
+          server: https://acme-v02.api.letsencrypt.org/directory
+          privateKeySecretRef:
+            name: letsencrypt-http-key
+          solvers:
+            - http01:
+                ingress:
+                  class: nginx
+
+- name: Install metrics-server
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    src: https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+- name: Patch metrics-server args
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config patch deployment metrics-server -n kube-system --type='json'
+    -p='[
+      {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"},
+      {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-preferred-address-types=InternalIP"}
+    ]'
+  register: patch_result
+  changed_when: patch_result.rc == 0
+  failed_when: false
+
+- name: Restart metrics-server deployment
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config rollout restart deployment metrics-server -n kube-system
+  changed_when: true
+
+- name: Wait for metrics-server to be ready
+  ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config rollout status deployment metrics-server -n kube-system
+  changed_when: false

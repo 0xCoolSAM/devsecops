@@ -1,0 +1,11 @@
+---
+skip_list:
+  - yaml[truthy]
+  - yaml[trailing-spaces]
+  - yaml[line-length]
+  - yaml[indentation]
+  - command-instead-of-module
+  - risky-file-permissions
+  - risky-shell-pipe
+  - no-changed-when
+  - role-name[path]

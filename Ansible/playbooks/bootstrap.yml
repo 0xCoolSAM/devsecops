@@ -1,0 +1,30 @@
+---
+# Ansible/playbooks/bootstrap.yml
+
+- name: DevSecOps Cluster Bootstrapping
+  hosts: all
+  become: true
+  vars:
+    # Use inventory_hostname since Terraform passes the public IP there
+    pub_ip: "{{ inventory_hostname }}"
+    nip_ip: "{{ pub_ip | replace('.', '-') }}"
+
+  pre_tasks:
+    - name: Ensure python installed for Ansible modules
+      ansible.builtin.raw: apt-get update && apt-get install -y python3-pip
+      changed_when: false
+
+    - name: Ensure kubernetes python module installed
+      ansible.builtin.pip:
+        name: kubernetes
+        state: present
+        extra_args: --break-system-packages
+
+  roles:
+    - role: ../roles/common
+    - role: ../roles/kubernetes
+    - role: ../roles/ingress-certmanager
+    - role: ../roles/devsecops-tools
+    - role: ../roles/jenkins
+    - role: ../roles/portal-and-ingress
+    - role: ../roles/post-setup-secrets

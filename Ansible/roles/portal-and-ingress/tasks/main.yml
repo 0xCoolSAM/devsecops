@@ -1,0 +1,247 @@
+---
+# Ansible/roles/portal-and-ingress/tasks/main.yml
+
+- name: Create namespaces
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ item }}"
+  loop:
+    - devsecops-portal
+    - tekton-devsecops
+    - dev
+    - argocd
+
+- name: Create devsecops-urls ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: devsecops-urls
+        namespace: tekton-devsecops
+      data:
+        SONAR_URL: https://sonarqube-{{ nip_ip }}.nip.io
+        DEFECTDOJO_URL: https://defectdojo-{{ nip_ip }}.nip.io
+        JENKINS_URL: https://jenkins-{{ nip_ip }}.nip.io
+        ARGOCD_URL: https://argocd-{{ nip_ip }}.nip.io
+        ARGOCD_SERVER: argocd-{{ nip_ip }}.nip.io
+        TEKTON_URL: https://tekton-{{ nip_ip }}.nip.io
+        APP_URL: https://devsecops-{{ nip_ip }}.nip.io
+
+- name: Create Portal HTML ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: portal-html
+        namespace: devsecops-portal
+      data:
+        index.html: "{{ lookup('template', 'portal.html.j2') }}"
+
+- name: Deploy Portal workload
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: portal
+        namespace: devsecops-portal
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: portal
+        template:
+          metadata:
+            labels:
+              app: portal
+          spec:
+            containers:
+              - name: nginx
+                image: nginx:stable
+                ports:
+                  - containerPort: 80
+                volumeMounts:
+                  - name: html
+                    mountPath: /usr/share/nginx/html/index.html
+                    subPath: index.html
+            volumes:
+              - name: html
+                configMap:
+                  name: portal-html
+
+- name: Create Portal Service
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: portal
+        namespace: devsecops-portal
+      spec:
+        selector:
+          app: portal
+        ports:
+          - port: 80
+            targetPort: 80
+
+- name: Create Portal Ingress
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: portal
+        namespace: devsecops-portal
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-http
+          nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - devsecops.switzerlandnorth.cloudapp.azure.com
+            secretName: portal-tls
+        rules:
+          - host: devsecops.switzerlandnorth.cloudapp.azure.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: portal
+                      port:
+                        number: 80
+
+- name: Check Portal TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: devsecops-portal
+    name: portal-tls
+  register: portal_cert
+  until: >
+    portal_cert.resources | length > 0 and  (portal_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first
+    | default('False')) == 'True'
+  retries: 24
+  delay: 5
+
+- name: Create App Ingress (GitOps Application)
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: devsecops-ingress
+        namespace: dev
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-http
+          nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      spec:
+        ingressClassName: nginx
+        tls:
+          - hosts:
+              - devsecops-{{ nip_ip }}.nip.io
+            secretName: app-tls
+        rules:
+          - host: devsecops-{{ nip_ip }}.nip.io
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: devsecops
+                      port:
+                        number: 8080
+
+- name: Check App TLS
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Certificate
+    namespace: dev
+    name: app-tls
+  register: app_cert
+  until: >
+    app_cert.resources | length > 0 and  (app_cert.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first | default('False'))
+    == 'True'
+  retries: 24
+  delay: 5
+
+- name: Configure ArgoCD GitOps project and application
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: argoproj.io/v1alpha1
+      kind: AppProject
+      metadata:
+        name: devsecops-project
+        namespace: argocd
+      spec:
+        description: DevSecOps platform project
+        sourceRepos:
+          - https://github.com/0x70ssAM/devsecops
+          - https://github.com/0x70ssAM/devsecops.git
+        destinations:
+          - namespace: dev
+            server: https://kubernetes.default.svc
+          - namespace: default
+            server: https://kubernetes.default.svc
+        clusterResourceWhitelist:
+          - group: ""
+            kind: Namespace
+        namespaceResourceWhitelist:
+          - group: "*"
+            kind: "*"
+    - apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: devsecops-app
+        namespace: argocd
+        labels:
+          app.kubernetes.io/part-of: devsecops
+      spec:
+        project: devsecops-project
+        source:
+          repoURL: https://github.com/0x70ssAM/devsecops
+          targetRevision: main
+          path: .
+          directory:
+            include: k8s_deployment_service.yaml
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: dev
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=true
+            - ApplyOutOfSyncOnly=true
+          retry:
+            limit: 3
+            backoff:
+              duration: 5s
+              factor: 2
+              maxDuration: 60s

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>DevSecOps Platform</title>
+
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,
+    <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>
+    <text y='.9em' font-size='90'>🚀</text>
+    </svg>">
+
+    <style>
+        body {
+            background: #0f172a;
+            color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding-top: 100px;
+        }
+        h1 {
+            font-size: 40px;
+            margin-bottom: 50px;
+        }
+        .card {
+            display: inline-block;
+            margin: 20px;
+            padding: 30px;
+            width: 220px;
+            border-radius: 12px;
+            background: #1e293b;
+            transition: 0.3s;
+        }
+        .card:hover {
+            background: #334155;
+            transform: scale(1.05);
+        }
+        a {
+            text-decoration: none;
+            color: white;
+            font-size: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 DevSecOps Platform</h1>
+
+    <div class="card">
+        <a href="https://argocd-{{ nip_ip }}.nip.io" target="_blank">ArgoCD</a>
+    </div>
+
+    <div class="card">
+        <a href="https://jenkins-{{ nip_ip }}.nip.io" target="_blank">Jenkins</a>
+    </div>
+
+    <div class="card">
+        <a href="https://tekton-{{ nip_ip }}.nip.io" target="_blank">Tekton</a>
+    </div>
+
+    <div class="card">
+        <a href="https://sonarqube-{{ nip_ip }}.nip.io" target="_blank">SonarQube</a>
+    </div>
+
+    <div class="card">
+        <a href="https://defectdojo-{{ nip_ip }}.nip.io" target="_blank">DefectDojo</a>
+    </div>
+
+    <div class="card">
+        <a href="https://devsecops-{{ nip_ip }}.nip.io" target="_blank">App</a>
+    </div>
+</body>
+</html>

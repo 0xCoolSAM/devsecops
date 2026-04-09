@@ -1,0 +1,193 @@
+---
+# Ansible/roles/post-setup-secrets/tasks/main.yml
+
+- name: Create git-credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: git-credentials
+        namespace: tekton-devsecops
+      stringData:
+        username: "{{ git_username }}"
+        token: "{{ git_token }}"
+  when: git_token | default('') != ''
+
+- name: Create dockerhub-secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: dockerhub-secret
+        namespace: tekton-devsecops
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: "{{ {'auths': {'https://index.docker.io/v1/': {'username': dockerhub_username, 'password': dockerhub_password, 'email': 'dummy@example.com',\
+          \ 'auth': (dockerhub_username + ':' + dockerhub_password) | b64encode}}} | to_json | b64encode }}"
+  when: dockerhub_username | default('') != '' and dockerhub_password | default('') != ''
+
+- name: Generate SonarQube token
+  ansible.builtin.uri:
+    url: https://sonarqube-{{ nip_ip }}.nip.io/api/user_tokens/generate
+    method: POST
+    user: admin
+    password: "{{ sonarqube_admin_pass }}"
+    force_basic_auth: true
+    body_format: form-urlencoded
+    body:
+      name: tekton-token1
+    validate_certs: false
+  register: sonar_token_response
+  retries: 60
+  delay: 10
+  until: sonar_token_response.status == 200
+  ignore_errors: true
+
+- name: Create sonar-secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: sonar-secret
+        namespace: tekton-devsecops
+      stringData:
+        token: "{{ sonar_token_response.json.token }}"
+  when: sonar_token_response is not failed
+
+- name: Generate DefectDojo token
+  ansible.builtin.uri:
+    url: https://defectdojo-{{ nip_ip }}.nip.io/api/v2/api-token-auth/
+    method: POST
+    body_format: json
+    body:
+      username: admin
+      password: "{{ defectdojo_pass }}"
+    validate_certs: false
+  register: dd_token_response
+  retries: 60
+  delay: 10
+  until: dd_token_response.status == 200
+  ignore_errors: true
+
+- name: Create defectdojo-secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: defectdojo-secret
+        namespace: tekton-devsecops
+      stringData:
+        token: "{{ dd_token_response.json.token }}"
+  when: dd_token_response is not failed
+
+- name: Create slack-webhook-secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: slack-webhook-secret
+        namespace: tekton-devsecops
+      stringData:
+        url: "{{ slack_webhook_url }}"
+  when: slack_webhook_url | default('') != ''
+
+- name: Install Cosign
+  ansible.builtin.get_url:
+    url: https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+    dest: /usr/local/bin/cosign
+    mode: "0755"
+
+- name: Generate Cosign Password
+  ansible.builtin.set_fact:
+    cosign_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=16') }}"
+
+- name: Generate Cosign Key Pair
+  ansible.builtin.command: cosign generate-key-pair
+  environment:
+    COSIGN_PASSWORD: "{{ cosign_password }}"
+  args:
+    chdir: /tmp
+    creates: /tmp/cosign.key
+
+- name: Create cosign-key secret
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cosign-key
+        namespace: tekton-devsecops
+      stringData:
+        password: "{{ cosign_password }}"
+      data:
+        cosign.key: "{{ lookup('file', '/tmp/cosign.key') | b64encode }}"
+        cosign.pub: "{{ lookup('file', '/tmp/cosign.pub') | b64encode }}"
+
+- name: Fetch ArgoCD Admin Password
+  kubernetes.core.k8s_info:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    kind: Secret
+    namespace: argocd
+    name: argocd-initial-admin-secret
+  register: argocd_secret
+  retries: 60
+  delay: 10
+  until: argocd_secret.resources | length > 0
+
+- name: Set ArgoCD password fact
+  ansible.builtin.set_fact:
+    argocd_pass: "{{ argocd_secret.resources[0].data.password | b64decode }}"
+
+- name: Create argo-pass secret in tekton namespace
+  kubernetes.core.k8s:
+    kubeconfig: /home/{{ ansible_user }}/.kube/config
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: argo-pass
+        namespace: tekton-devsecops
+      stringData:
+        password: "{{ argocd_pass }}"
+
+- name: Ensure /etc/devsecops dir
+  ansible.builtin.file:
+    path: /etc/devsecops
+    state: directory
+    mode: "0755"
+
+- name: Fetch Jenkins Initial Admin Password
+  ansible.builtin.slurp:
+    src: /var/lib/jenkins/secrets/initialAdminPassword
+  register: jenkins_secret
+  retries: 60
+  delay: 10
+  until: jenkins_secret is not failed
+
+- name: Save credentials to passwords.json
+  ansible.builtin.copy:
+    dest: /etc/devsecops/passwords.json
+    content: |
+      {
+        "ARGOCD_PASSWORD": "{{ argocd_pass }}",
+        "JENKINS_PASSWORD": "{{ jenkins_secret['content'] | b64decode | trim }}"
+      }
+    mode: "0644"
